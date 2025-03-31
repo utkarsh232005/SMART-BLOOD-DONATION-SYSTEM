@@ -46,10 +46,10 @@ export default function Profile() {
   
   // Fetch user profile data
   useEffect(() => {
-          const userData = await userAPI.getProfile() as ProfileData;
-          setProfileData({
-        if (user) {
-          const userData = await userAPI.getProfile();
+    async function fetchProfileData() {
+      if (user) {
+        try {
+          const userData: ProfileData = await userAPI.getProfile();
           setProfileData({
             firstName: userData.firstName || '',
             lastName: userData.lastName || '',
@@ -62,11 +62,11 @@ export default function Profile() {
             lastLoginDevice: userData.lastLoginDevice || '',
             loginCount: userData.loginCount || 0
           });
+        } catch (error) {
+          console.error('Failed to fetch profile data:', error);
         }
-      } catch (error) {
-        console.error('Failed to fetch profile data:', error);
       }
-    };
+    }
 
     fetchProfileData();
   }, [user]);
