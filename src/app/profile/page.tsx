@@ -9,6 +9,23 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth-context';
 import { userAPI } from '@/lib/api';
 
+interface UserData {
+  uid: string;
+  email: string | null;
+}
+
+interface ProfileData extends UserData {
+  firstName?: string;
+  lastName?: string;
+  bloodType?: string;
+  isAvailable?: boolean;
+  phone?: string;
+  address?: string;
+  lastLoginTime?: string;
+  lastLoginDevice?: string;
+  loginCount?: number;
+}
+
 export default function Profile() {
   const router = useRouter();
   const { user } = useAuth();
@@ -29,8 +46,8 @@ export default function Profile() {
   
   // Fetch user profile data
   useEffect(() => {
-    const fetchProfileData = async () => {
-      try {
+          const userData = await userAPI.getProfile() as ProfileData;
+          setProfileData({
         if (user) {
           const userData = await userAPI.getProfile();
           setProfileData({

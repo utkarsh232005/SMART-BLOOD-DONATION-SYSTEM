@@ -232,26 +232,26 @@ export default function Dashboard() {
 
   const handleDonationStatusChange = async (donationId: string, newStatus: 'available' | 'pending' | 'completed') => {
     try {
-      const id = donationId.split('-')[1]; // Extract numeric ID
-      
+      const id = donationId.split('-')[1]; // Extract numeric ID as a string
+
       if (newStatus === 'completed') {
-        await donationAPI.confirmDonation(Number(id));
+        await donationAPI.confirmDonation(id); // Pass `id` as a string
       } else if (newStatus === 'available' && userType === 'recipient') {
-        await donationAPI.cancelRequest(Number(id));
+        await donationAPI.cancelRequest(id); // Pass `id` as a string
       }
-      
+
       // Update local state
-      setDonations(donations.map(donation => 
-        donation.id === donationId 
-          ? { ...donation, status: newStatus } 
+      setDonations(donations.map(donation =>
+        donation.id === donationId
+          ? { ...donation, status: newStatus }
           : donation
       ));
-      
+
       // Update localStorage for fallback
       localStorage.setItem('bloodconnect_donations', JSON.stringify(
-        donations.map(donation => 
-          donation.id === donationId 
-            ? { ...donation, status: newStatus } 
+        donations.map(donation =>
+          donation.id === donationId
+            ? { ...donation, status: newStatus }
             : donation
         )
       ));
@@ -262,8 +262,8 @@ export default function Dashboard() {
 
   const handleRequestDonation = async (donationId: string) => {
     try {
-      const id = donationId.split('-')[1]; // Extract numeric ID
-      await donationAPI.requestDonation(Number(id));
+      const id = donationId.split('-')[1]; // Extract numeric ID as string
+      await donationAPI.requestDonation(id);
       
       // Update local state
       setDonations(donations.map(donation => 
