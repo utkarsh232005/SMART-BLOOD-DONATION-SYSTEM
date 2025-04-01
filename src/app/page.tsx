@@ -7,6 +7,8 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { LampDemo } from '@/components/ui/lamp';
 import { useAuth } from '@/lib/auth-context';
+import React from "react";
+import { BackgroundBeamsWithCollision } from "@/components/ui/background-beams-with-collision";
 
 export default function Home() {
   const router = useRouter();
@@ -41,6 +43,7 @@ export default function Home() {
           </nav>
         </div>
       </header>
+      
 
       {/* Hero Section with Lamp Effect */}
       <LampDemo />

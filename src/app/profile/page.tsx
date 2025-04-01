@@ -24,6 +24,7 @@ interface ProfileData extends UserData {
   lastLoginTime?: string;
   lastLoginDevice?: string;
   loginCount?: number;
+  role?: string; // Add role to ProfileData interface
 }
 
 export default function Profile() {
@@ -41,12 +42,13 @@ export default function Profile() {
     address: '',
     lastLoginTime: '',
     lastLoginDevice: '',
-    loginCount: 0
+    loginCount: 0,
+    role: '' // Add role field
   });
   
   // Fetch user profile data
   useEffect(() => {
-    async function fetchProfileData() {
+    const fetchProfileData = async () => {
       if (user) {
         try {
           const userData: ProfileData = await userAPI.getProfile();
@@ -60,13 +62,14 @@ export default function Profile() {
             address: userData.address || '',
             lastLoginTime: userData.lastLoginTime || '',
             lastLoginDevice: userData.lastLoginDevice || '',
-            loginCount: userData.loginCount || 0
+            loginCount: userData.loginCount || 0,
+            role: userData.role || 'DONOR' // Set role with default
           });
         } catch (error) {
           console.error('Failed to fetch profile data:', error);
         }
       }
-    }
+    };
 
     fetchProfileData();
   }, [user]);
@@ -456,6 +459,16 @@ export default function Profile() {
                           <p className="text-white">{profileData.address || 'Not provided'}</p>
                         </div>
                       </div>
+
+                      <div>
+                        <h4 className="text-sm font-medium text-gray-400">User Role</h4>
+                        <div className="flex items-center mt-1">
+                          <User className="h-4 w-4 text-[#9C27B0] mr-2" />
+                          <p className="text-white">
+                            {profileData.role === 'DONOR' ? 'Blood Donor' : 'Blood Recipient'}
+                          </p>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -495,4 +508,4 @@ const LogoIcon = () => {
       <div className="h-5 w-6 shrink-0 rounded-tl-lg rounded-tr-sm rounded-br-lg rounded-bl-sm bg-[#9C27B0]" />
     </Link>
   );
-}; 
+};

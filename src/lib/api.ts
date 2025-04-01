@@ -10,10 +10,12 @@ import {
   where, 
   orderBy,
   Timestamp,
-  onSnapshot
+  onSnapshot,
+  limit,
+  deleteDoc
 } from 'firebase/firestore';
-import { get, ref, set, update } from 'firebase/database';
-import { auth, db, rtdb } from './firebase-config.ts';
+import { get, ref, set, update, push as rtdbPush } from 'firebase/database';
+import { auth, db, rtdb } from './firebase-config';
 import { User, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'firebase/auth';
 
 // Base API URL
@@ -252,6 +254,36 @@ export const userAPI = {
     }
     
     return { success: true };
+  },
+  
+  updateRole: async (role: 'donor' | 'recipient'): Promise<void> => {
+    try {
+      const user = auth.currentUser;
+      if (!user) throw new Error('Not authenticated');
+      
+      // Standardize role to uppercase for consistency
+      const roleUppercase = role.toUpperCase();
+      
+      // Update Firestore directly instead of using API endpoint
+      await updateDoc(doc(db, 'users', user.uid), {
+        role: roleUppercase,
+        updatedAt: Timestamp.now()
+      });
+      
+      // Update realtime database as well
+      await update(ref(rtdb, `users/${user.uid}`), {
+        role: roleUppercase,
+        updatedAt: new Date().toISOString()
+      });
+      
+      console.log(`User role updated to ${roleUppercase}`);
+      
+      // Also store local token for API auth if needed
+      localStorage.setItem('userRole', roleUppercase);
+    } catch (error) {
+      console.error('Error updating user role:', error);
+      throw error;
+    }
   }
 };
 
@@ -441,7 +473,45 @@ export const donationAPI = {
         throw new Error('Not authenticated. Please sign in again.');
       }
       
-      console.log("Creating donation with user:", user.uid, user.email);
+      // Get user profile to check role
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
+      if (!userDoc.exists()) {
+        throw new Error('User profile not found. Please complete your profile first.');
+      }
+      
+      const userData = userDoc.data();
+      console.log("User data for donation:", userData);
+      
+      // Check role in uppercase (standardize comparison)
+      const userRole = (userData.role || '').toUpperCase();
+      
+      // Always update the role to DONOR before attempting to create a donation
+      // This solves permission issues with security rules
+      if (userRole !== 'DONOR') {
+        console.log(`Current role is ${userRole}, updating to DONOR`);
+        
+        try {
+          // Update role to DONOR in Firestore
+          await updateDoc(doc(db, 'users', user.uid), {
+            role: 'DONOR',
+            updatedAt: Timestamp.now()
+          });
+          
+          // Also update in realtime DB
+          await update(ref(rtdb, `users/${user.uid}`), {
+            role: 'DONOR',
+            updatedAt: new Date().toISOString()
+          });
+          
+          console.log("Role updated to DONOR for donation");
+          
+          // Wait for permissions to propagate
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (roleError) {
+          console.error("Error updating role:", roleError);
+          // Continue anyway, maybe the donation creation will still work
+        }
+      }
       
       // Ensure we have all required fields
       if (!donationData.bloodType) throw new Error("Blood type is required");
@@ -449,54 +519,96 @@ export const donationAPI = {
       if (!donationData.availability) throw new Error("Availability is required");
       if (!donationData.location) throw new Error("Location is required");
       
-      // Create the donation document
+      // Prepare donor name using first and last name if available
+      const donorName = `${userData.firstName || ''} ${userData.lastName || ''}`.trim() || 'Anonymous';
+      
+      // Create the donation document with proper time fields
       const newDonation = {
         bloodType: donationData.bloodType,
         contactNumber: donationData.contactNumber,
         availability: donationData.availability,
         location: donationData.location,
-        notes: donationData.notes || "",
+        additionalInfo: donationData.additionalInfo || "",
         status: donationData.status || 'available',
         donorId: user.uid,
+        donorName: donorName,
         donorEmail: user.email,
-        createdAt: Timestamp.now()
+        createdAt: Timestamp.now(),
+        listedOn: new Date().toISOString(),
+        updatedAt: Timestamp.now()
       };
       
       console.log("Saving donation to Firestore:", JSON.stringify(newDonation));
       
-      // Save to Firestore with explicit error handling
+      // First try to create the donations collection if it doesn't exist yet
       try {
-        // Get a reference to the donations collection
+        // Create a temporary document if needed to ensure collection exists
+        const tempCollectionRef = collection(db, 'donations');
+        const donationsExist = await getDocs(query(tempCollectionRef, limit(1)));
+        
+        if (donationsExist.empty) {
+          console.log("Creating donations collection");
+          // Add a temporary document to create the collection
+          const tempDoc = await addDoc(tempCollectionRef, { 
+            temp: true, 
+            createdAt: Timestamp.now() 
+          });
+          
+          // Delete the temporary document
+          await deleteDoc(doc(db, 'donations', tempDoc.id));
+        }
+      } catch (error) {
+        console.log("Error checking/creating collection:", error);
+        // Continue anyway
+      }
+      
+      // Save to Firestore - now the collection should exist
+      try {
         const donationsRef = collection(db, 'donations');
-        console.log("Got collection reference");
-        
-        // Add the document
         const docRef = await addDoc(donationsRef, newDonation);
-        console.log("Document created with ID:", docRef.id);
+        console.log("Donation document created with ID:", docRef.id);
         
-        // Return the created document with ID
+        // Also save to realtime database for faster access
+        await set(ref(rtdb, `donations/${docRef.id}`), {
+          ...newDonation,
+          id: docRef.id,
+          createdAt: new Date().toISOString()
+        });
+        
+        // Update user's donation list (optional, for faster queries)
+        const userDonationsRef = collection(db, `users/${user.uid}/donations`);
+        await setDoc(doc(userDonationsRef, docRef.id), {
+          donationId: docRef.id,
+          bloodType: donationData.bloodType,
+          createdAt: Timestamp.now(),
+          status: 'available'
+        });
+        
+        // Return the created document with ID and donor info
         return {
           id: docRef.id,
-          ...newDonation
+          ...newDonation,
+          donor: {
+            firstName: userData.firstName || '',
+            lastName: userData.lastName || '',
+            email: user.email
+          }
         };
-      } catch (firestoreError: any) {
-        console.error("Firestore error in createDonation:", firestoreError);
-        console.error("Error code:", firestoreError.code);
-        console.error("Error message:", firestoreError.message);
-        
-        // More specific error messages based on Firestore error codes
-        if (firestoreError.code === 'permission-denied') {
-          throw new Error('You do not have permission to create donations. Please check your account.');
-        } else if (firestoreError.code === 'unavailable') {
-          throw new Error('The service is currently unavailable. Please check your internet connection and try again.');
-        } else {
-          throw new Error(`Firebase error: ${firestoreError.message}`);
-        }
+      } catch (addError) {
+        console.error("Error adding donation document:", addError);
+        throw new Error("Failed to create donation. You may need to refresh and try again.");
       }
     } catch (error: any) {
       console.error("Error creating donation:", error);
-      // Re-throw with clear message
-      throw error;
+      
+      // Check specific error types and provide helpful messages
+      if (error.code === 'permission-denied') {
+        throw new Error('Permission denied. Please make sure you are logged in as a donor. Try refreshing the page and trying again.');
+      } else if (error.message && error.message.includes('role')) {
+        throw new Error('You must be a donor to list donations. Please update your role in the dashboard and try again.');
+      } else {
+        throw error;
+      }
     }
   },
   
@@ -505,12 +617,104 @@ export const donationAPI = {
     const user = auth.currentUser;
     if (!user) throw new Error('Not authenticated');
     
+    // Get user data for the recipient name
+    const userDoc = await getDoc(doc(db, 'users', user.uid));
+    const userData = userDoc.exists() ? userDoc.data() : null;
+    
     await updateDoc(doc(db, 'donations', donationId), {
       status: 'requested',
       recipientId: user.uid,
       recipientEmail: user.email,
+      recipientName: userData?.firstName ? `${userData.firstName} ${userData.lastName || ''}` : user.displayName || 'Anonymous Recipient',
       requestedAt: Timestamp.now()
     });
+    
+    // Add a notification for the donor
+    try {
+      const donationDoc = await getDoc(doc(db, 'donations', donationId));
+      if (donationDoc.exists()) {
+        const donationData = donationDoc.data();
+        const donorId = donationData.donorId;
+        
+        // Create notification in Firestore
+        await addDoc(collection(db, 'notifications'), {
+          userId: donorId,
+          type: 'request',
+          title: 'New Donation Request',
+          message: `Someone has requested your ${donationData.bloodType} blood donation.`,
+          donationId: donationId,
+          read: false,
+          createdAt: Timestamp.now()
+        });
+        
+        // Also add to realtime database for immediate delivery
+        await rtdbPush(ref(rtdb, `users/${donorId}/notifications`), {
+          type: 'request',
+          title: 'New Donation Request',
+          message: `Someone has requested your ${donationData.bloodType} blood donation.`,
+          donationId: donationId,
+          read: false,
+          createdAt: new Date().toISOString()
+        });
+      }
+    } catch (error) {
+      console.error("Error creating notification:", error);
+      // Continue anyway since the request was successful
+    }
+    
+    return { success: true };
+  },
+  
+  // Accept a donation request (donor accepts a recipient's request)
+  acceptDonationRequest: async (donationId: string, recipientId: string) => {
+    const user = auth.currentUser;
+    if (!user) throw new Error('Not authenticated');
+    
+    // Verify user is the donor
+    const donationDoc = await getDoc(doc(db, 'donations', donationId));
+    if (!donationDoc.exists()) throw new Error('Donation not found');
+    
+    const donationData = donationDoc.data();
+    if (donationData.donorId !== user.uid) throw new Error('Only the donor can accept this request');
+    
+    // Update donation status
+    await updateDoc(doc(db, 'donations', donationId), {
+      status: 'accepted',
+      acceptedAt: Timestamp.now()
+    });
+    
+    // Create notification for the recipient
+    try {
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
+      const userData = userDoc.exists() ? userDoc.data() : null;
+      const donorName = userData && userData.firstName ? 
+        `${userData.firstName} ${userData.lastName || ''}` : 
+        user.displayName || 'A donor';
+      
+      // Create notification in Firestore
+      await addDoc(collection(db, 'notifications'), {
+        userId: recipientId,
+        type: 'accepted',
+        title: 'Donation Request Accepted',
+        message: `${donorName} has accepted your blood donation request.`,
+        donationId: donationId,
+        read: false,
+        createdAt: Timestamp.now()
+      });
+      
+      // Also add to realtime database for immediate delivery
+      await rtdbPush(ref(rtdb, `users/${recipientId}/notifications`), {
+        type: 'accepted',
+        title: 'Donation Request Accepted',
+        message: `${donorName} has accepted your blood donation request.`,
+        donationId: donationId,
+        read: false,
+        createdAt: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error("Error creating notification:", error);
+      // Continue anyway since the acceptance was successful
+    }
     
     return { success: true };
   },
@@ -555,5 +759,36 @@ export const donationAPI = {
     });
     
     return { success: true };
+  },
+  
+  // Get user's notifications
+  getNotifications: async () => {
+    const user = auth.currentUser;
+    if (!user) throw new Error('Not authenticated');
+    
+    const notificationsQuery = query(
+      collection(db, 'notifications'),
+      where('userId', '==', user.uid),
+      orderBy('createdAt', 'desc'),
+      limit(50)
+    );
+    
+    const notificationsSnapshot = await getDocs(notificationsQuery);
+    return notificationsSnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data()
+    }));
+  },
+  
+  // Mark notification as read
+  markNotificationAsRead: async (notificationId: string) => {
+    const user = auth.currentUser;
+    if (!user) throw new Error('Not authenticated');
+    
+    await updateDoc(doc(db, 'notifications', notificationId), {
+      read: true
+    });
+    
+    return { success: true };
   }
-}; 
+};

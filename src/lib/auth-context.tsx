@@ -6,11 +6,15 @@ import {
   createUserWithEmailAndPassword,
   onAuthStateChanged,
   signOut,
-  User
+  User as FirebaseUser
 } from 'firebase/auth';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
-import { ref, set } from 'firebase/database';
+import { doc, setDoc, getDoc, updateDoc } from 'firebase/firestore';
+import { ref, set, update } from 'firebase/database';
 import { auth, db, rtdb } from './firebase-config'; 
+
+interface User extends FirebaseUser {
+  role?: 'DONOR' | 'RECIPIENT'; // Add role field
+}
 
 interface AuthContextType {
   user: User | null;
@@ -20,6 +24,7 @@ interface AuthContextType {
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, userData: any) => Promise<void>;
   logout: () => Promise<void>;
+  updateUserRole: (role: 'donor' | 'recipient') => Promise<boolean>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -32,22 +37,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setUser(user);
-      setLoading(false);
-      
       if (user) {
         try {
           // Get user data from Firestore
           const userDoc = await getDoc(doc(db, 'users', user.uid));
           if (userDoc.exists()) {
-            setUserData(userDoc.data());
+            const userData = userDoc.data();
+            
+            // Set the role on the user object for easier access
+            (user as User).role = userData.role?.toUpperCase() as 'DONOR' | 'RECIPIENT';
+            
+            setUserData(userData);
           }
+          setUser(user as User);
         } catch (error) {
           console.error('Error fetching user data:', error);
+          setUser(user as User);
         }
       } else {
+        setUser(null);
         setUserData(null);
       }
+      setLoading(false);
     });
 
     return () => unsubscribe();
@@ -114,6 +125,63 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const updateUserRole = async (role: 'donor' | 'recipient') => {
+    setLoading(true);
+    try {
+      const user = auth.currentUser;
+      if (!user) throw new Error('Not authenticated');
+      
+      // Make role uppercase for consistency
+      const roleUppercase = role.toUpperCase();
+      
+      console.log(`Updating user role to ${roleUppercase}`);
+      
+      // Update in Firestore
+      await updateDoc(doc(db, 'users', user.uid), {
+        role: roleUppercase,
+        updatedAt: new Date()
+      });
+      
+      // Update realtime database for faster access
+      await update(ref(rtdb, `users/${user.uid}`), {
+        role: roleUppercase,
+        updatedAt: new Date().toISOString()
+      });
+      
+      // Update user state with new role
+      setUser(currentUser => {
+        if (!currentUser) return null;
+        
+        // Create a new user object with the updated role
+        const updatedUser = { ...currentUser } as User;
+        updatedUser.role = roleUppercase as 'DONOR' | 'RECIPIENT';
+        return updatedUser;
+      });
+      
+
+      
+      // Update user data state
+      setUserData((currentData: any) => {
+        if (!currentData) return null;
+        return {
+          ...currentData,
+          role: roleUppercase
+        };
+      });
+      
+      // Store role in localStorage as a fallback
+      localStorage.setItem('userRole', roleUppercase);
+      
+      console.log(`Role successfully updated to ${roleUppercase}`);
+      return true;
+    } catch (error) {
+      console.error('Error updating user role:', error);
+      throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <AuthContext.Provider
       value={{
@@ -123,7 +191,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         error,
         login,
         register,
-        logout
+        logout,
+        updateUserRole
       }}
     >
       {children}

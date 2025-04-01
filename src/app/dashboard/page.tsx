@@ -1,6 +1,6 @@
 'use client';
 
-import { Bell, Droplet, Heart, Users, LayoutDashboard, User, Settings, LogOut, UserCircle, Calendar, AlertCircle, Clock, Phone, Mail, Info, Plus, Edit } from 'lucide-react';
+import { Bell, Droplet, Heart, Users, LayoutDashboard, User, Settings, LogOut, UserCircle, Calendar, AlertCircle, Clock, Phone, Mail, Info, Plus, Edit, CheckCircle } from 'lucide-react';
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
 import { Sidebar, SidebarBody, SidebarLink } from '@/components/ui/sidebar';
@@ -12,15 +12,19 @@ import UserTypeSelector from '@/components/UserTypeSelector';
 import DonationListingForm, { DonationListingData } from '@/components/DonationListingForm';
 import DonationsList from '@/components/DonationsList';
 import { donationAPI, userAPI } from '@/lib/api';
-import { Toaster } from 'react-hot-toast';
+import { useAuth } from '@/lib/auth-context';
+import { toast, Toaster } from 'react-hot-toast';
 
 export default function Dashboard() {
   const router = useRouter();
+  const { user } = useAuth();
   const [open, setOpen] = useState(false);
   const [showDonationModal, setShowDonationModal] = useState(false);
   const [showListingModal, setShowListingModal] = useState(false);
   const [showRescheduleModal, setShowRescheduleModal] = useState(false);
-  const [userType, setUserType] = useState<'donor' | 'recipient'>('donor');
+  const [userType, setUserType] = useState<'donor' | 'recipient'>(
+    user?.role?.toLowerCase() === 'recipient' ? 'recipient' : 'donor'
+  );
   const [donations, setDonations] = useState<DonationListingData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [appointmentToReschedule, setAppointmentToReschedule] = useState<Appointment | null>(null);
@@ -29,6 +33,14 @@ export default function Dashboard() {
     { id: 2, type: 'appointment', message: 'Your donation appointment is confirmed', time: '1 hour ago' },
     { id: 3, type: 'update', message: 'Blood inventory update: A+ type is low', time: '3 hours ago' }
   ]);
+  const [userNotifications, setUserNotifications] = useState<any[]>([]);
+
+  // Update userType when user changes
+  useEffect(() => {
+    if (user?.role) {
+      setUserType(user.role.toLowerCase() as 'donor' | 'recipient');
+    }
+  }, [user]);
 
   // Load donations from backend API
   useEffect(() => {
@@ -105,6 +117,33 @@ export default function Dashboard() {
   useEffect(() => {
     localStorage.setItem('bloodconnect_appointments', JSON.stringify(appointments));
   }, [appointments]);
+
+  // Fetch notifications when component mounts
+  useEffect(() => {
+    const fetchNotifications = async () => {
+      if (user) {
+        try {
+          const notificationData = await donationAPI.getNotifications();
+          setUserNotifications(notificationData);
+          
+          // Check if there are unread notifications and update the UI accordingly
+          const unreadCount = notificationData.filter(notification => {
+            // First check if notification exists
+            if (!notification) return false;
+            // Then check if it has a read property that can be accessed
+            return typeof notification === 'object' && 'read' in notification && !notification.read;
+          }).length;
+          if (unreadCount > 0) {
+            // You could add a badge or notification indicator here
+          }
+        } catch (error) {
+          console.error('Error fetching notifications:', error);
+        }
+      }
+    };
+    
+    fetchNotifications();
+  }, [user]);
 
   const links = [
     {
@@ -226,8 +265,29 @@ export default function Dashboard() {
   };
 
   const handleListingSubmit = async (donationData: DonationListingData) => {
-    setDonations([donationData, ...donations]);
-    localStorage.setItem('bloodconnect_donations', JSON.stringify([donationData, ...donations]));
+    try {
+      // Add the new donation to the local state
+      setDonations(prevDonations => [donationData, ...prevDonations]);
+      
+      // Save to localStorage as fallback
+      const updatedDonations = [donationData, ...donations];
+      localStorage.setItem('bloodconnect_donations', JSON.stringify(updatedDonations));
+      
+      // Ensure we update the count of listed donations for stats
+      if (donationData.status === 'available') {
+        // Update donor stats
+        const newDonorStats = {
+          ...donorStats,
+          listedDonations: donorStats.listedDonations + 1
+        };
+      }
+      
+      // Show success message
+      toast.success('Donation listed successfully!');
+    } catch (error) {
+      console.error('Error saving donation:', error);
+      toast.error('Failed to save donation data');
+    }
   };
 
   const handleDonationStatusChange = async (donationId: string, newStatus: 'available' | 'pending' | 'completed') => {
@@ -285,6 +345,83 @@ export default function Dashboard() {
     }
   };
 
+  const handleAcceptDonationRequest = async (donationId: string, recipientId: string) => {
+    try {
+      const id = donationId.split('-')[1]; // Extract numeric ID as string
+      await donationAPI.acceptDonationRequest(id, recipientId);
+      
+      // Update local state to show the donation as accepted
+      setDonations(donations.map(donation => 
+        donation.id === donationId 
+          ? { ...donation, status: 'accepted' } 
+          : donation
+      ));
+      
+      // Show a success notification
+      toast.success('You have accepted the donation request!');
+      
+      // Refresh data to ensure everything is up-to-date
+      refreshUserDataAndDonations();
+    } catch (error) {
+      console.error('Error accepting donation request:', error);
+      toast.error('Failed to accept donation request. Please try again.');
+    }
+  };
+
+  // Add this new function to force-reload user data and donations
+  const refreshUserDataAndDonations = async () => {
+    setIsLoading(true);
+    try {
+      // First refresh user data from Firestore
+      const userData = await userAPI.getProfile();
+      
+      // Make sure the userType state is updated based on the latest user role
+      if (userData && typeof userData === 'object' && 'role' in userData && typeof userData.role === 'string') {
+        const role = userData.role.toLowerCase() as 'donor' | 'recipient';
+        setUserType(role);
+      }
+      
+      // Then reload the donations based on current user type
+      let donationData;
+      if (userType === 'donor') {
+        donationData = await donationAPI.getMyDonations();
+      } else {
+        donationData = await donationAPI.getAvailableDonations();
+      }
+      
+      // Transform and update the donations state
+      const transformedDonations = donationData.map((donation: any) => ({
+        id: `donation-${donation.id}`,
+        donorName: donation.donorName || 'Anonymous',
+        bloodType: donation.bloodType,
+        contactNumber: donation.contactNumber,
+        availability: donation.availability,
+        location: donation.location,
+        additionalInfo: donation.additionalInfo || '',
+        listedOn: new Date(donation.listedOn).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        status: donation.status.toLowerCase()
+      }));
+      
+      setDonations(transformedDonations);
+      
+      toast.success('Data refreshed successfully');
+    } catch (error) {
+      console.error('Error refreshing data:', error);
+      toast.error('Failed to refresh data');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Add this useEffect to refresh data when userType changes
+  useEffect(() => {
+    refreshUserDataAndDonations();
+  }, [userType]);
+
   // Filter donations based on user type
   const userDonations = userType === 'donor' 
     ? donations 
@@ -303,6 +440,9 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-[#121212] text-white">
+      {/* Toaster for notifications */}
+      <Toaster position="top-right" />
+      
       <div className="flex h-screen">
         <Sidebar open={open} setOpen={setOpen}>
           <SidebarBody className="justify-between gap-10">
@@ -347,7 +487,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* User Type Selector */}
+            {/* User Type Selector - Always shows after login */}
             <UserTypeSelector userType={userType} setUserType={setUserType} />
 
             {/* Stats Grid */}
@@ -431,6 +571,7 @@ export default function Dashboard() {
                 userType={userType}
                 onStatusChange={handleDonationStatusChange}
                 onRequestDonation={handleRequestDonation}
+                onAcceptRequest={handleAcceptDonationRequest}
               />
             </div>
 
@@ -525,32 +666,53 @@ export default function Dashboard() {
                 <div className="p-6 rounded-lg bg-[#1E1E1E] border border-[#333333] shadow-sm">
                   <h3 className="text-xl font-semibold text-white mb-4">Notifications</h3>
                   <div className="space-y-4">
-                    {notifications.map((notification) => (
-                      <div key={notification.id} className="flex items-start space-x-4 p-4 rounded-md bg-[#262626] border border-[#333333]">
-                        <div className={`flex-shrink-0 p-2 rounded-md ${
-                          notification.type === 'emergency' 
-                            ? 'bg-red-900' 
-                            : notification.type === 'appointment' 
+                    {userNotifications.length > 0 ? (
+                      userNotifications.slice(0, 3).map((notification) => (
+                        <div key={notification.id} className="flex items-start space-x-4 p-4 rounded-md bg-[#262626] border border-[#333333]">
+                          <div className={`flex-shrink-0 p-2 rounded-md ${
+                            notification.type === 'request' 
                               ? 'bg-blue-900' 
-                              : 'bg-gray-800'
-                        }`}>
-                          {notification.type === 'emergency' ? (
-                            <AlertCircle className="h-5 w-5 text-red-400" />
-                          ) : notification.type === 'appointment' ? (
-                            <Calendar className="h-5 w-5 text-blue-400" />
-                          ) : (
-                            <Info className="h-5 w-5 text-gray-400" />
+                              : notification.type === 'accepted' 
+                                ? 'bg-green-900' 
+                                : 'bg-gray-800'
+                          }`}>
+                            {notification.type === 'request' ? (
+                              <Heart className="h-5 w-5 text-blue-400" />
+                            ) : notification.type === 'accepted' ? (
+                              <CheckCircle className="h-5 w-5 text-green-400" />
+                            ) : (
+                              <Info className="h-5 w-5 text-gray-400" />
+                            )}
+                          </div>
+                          <div className="flex-1">
+                            <p className="text-white font-medium">{notification.title}</p>
+                            <p className="text-gray-400">{notification.message}</p>
+                            <p className="text-xs text-gray-500 mt-1">
+                              {new Date(notification.createdAt.toDate()).toLocaleString()}
+                            </p>
+                          </div>
+                          {!notification.read && (
+                            <div className="h-2 w-2 rounded-full bg-[#9C27B0]"></div>
                           )}
                         </div>
-                        <div className="flex-1">
-                          <p className="text-white">{notification.message}</p>
-                          <p className="text-xs text-gray-400 mt-1">{notification.time}</p>
-                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center p-8 bg-[#262626] border border-[#333333] rounded-md">
+                        <Bell className="h-12 w-12 mx-auto text-gray-400 mb-3" />
+                        <h3 className="text-lg font-semibold text-white">No notifications</h3>
+                        <p className="text-gray-400 mt-1">
+                          We'll notify you of important updates here
+                        </p>
                       </div>
-                    ))}
-                    <button className="w-full mt-2 bg-transparent border border-[#333333] text-white hover:bg-[#262626] py-2 rounded-md transition-colors">
-                      View All Notifications
-                    </button>
+                    )}
+                    {userNotifications.length > 0 && (
+                      <button 
+                        className="w-full mt-2 bg-transparent border border-[#333333] text-white hover:bg-[#262626] py-2 rounded-md transition-colors"
+                        onClick={() => router.push('/notifications')}
+                      >
+                        View All Notifications
+                      </button>
+                    )}
                   </div>
                 </div>
 

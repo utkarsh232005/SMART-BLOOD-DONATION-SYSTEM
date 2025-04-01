@@ -1,13 +1,10 @@
-import { useState } from 'react';
-import { Calendar, Clock, MapPin, X, Droplet, User, Phone, FileText } from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { X, Save, AlertCircle } from 'lucide-react';
 import { donationAPI } from '@/lib/api';
 import { toast } from 'react-hot-toast';
-
-interface DonationListingFormProps {
-  isOpen: boolean;
-  onClose: () => void;
-  onSubmit: (data: DonationListingData) => void;
-}
+import { useAuth } from '../lib/auth-context';
+import { updateDoc, doc } from 'firebase/firestore';
+import { db } from '@/lib/firebase-config';
 
 export interface DonationListingData {
   id: string;
@@ -16,74 +13,156 @@ export interface DonationListingData {
   contactNumber: string;
   availability: string;
   location: string;
-  additionalInfo: string;
+  additionalInfo?: string;
   listedOn: string;
-  status: 'available' | 'pending' | 'completed';
+  status: string;
 }
 
-export default function DonationListingForm({ isOpen, onClose, onSubmit }: DonationListingFormProps) {
-  const [donorName, setDonorName] = useState('');
-  const [bloodType, setBloodType] = useState('');
-  const [contactNumber, setContactNumber] = useState('');
-  const [availability, setAvailability] = useState('');
-  const [location, setLocation] = useState('');
-  const [additionalInfo, setAdditionalInfo] = useState('');
+interface DonationListingFormProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onSubmit: (data: DonationListingData) => void;
+}
+
+const DonationListingForm = ({ isOpen, onClose, onSubmit }: DonationListingFormProps) => {
+  const { user, userData, updateUserRole } = useAuth(); // Get updateUserRole from useAuth
+  const [formData, setFormData] = useState({
+    bloodType: '',
+    contactNumber: '',
+    availability: '',
+    location: '',
+    additionalInfo: ''
+  });
+  const [errors, setErrors] = useState<Record<string, string>>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
 
-  const bloodTypes = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+  const validateForm = () => {
+    const newErrors: Record<string, string> = {};
+    if (!formData.bloodType) newErrors.bloodType = 'Blood type is required';
+    if (!formData.contactNumber) newErrors.contactNumber = 'Contact number is required';
+    if (!formData.availability) newErrors.availability = 'Availability is required';
+    if (!formData.location) newErrors.location = 'Location is required';
+    
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  };
 
-  // Handle form submission
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({
+      ...prev,
+      [name]: value
+    }));
+    
+    // Clear field-specific error when user edits the field
+    if (errors[name]) {
+      setErrors(prev => {
+        const newErrors = { ...prev };
+        delete newErrors[name];
+        return newErrors;
+      });
+    }
+    
+    // Clear API error when user makes any changes
+    if (apiError) setApiError(null);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    if (!validateForm()) return;
+    
     setIsSubmitting(true);
+    setApiError(null);
     
     try {
-      // Create data to send to API
-      const donationData = {
-        bloodType,
-        contactNumber,
-        availability,
-        location, 
-        additionalInfo
-      };
+      // First make sure user has donor role
+      if (!user) {
+        throw new Error('You must be logged in to create a donation listing');
+      }
       
-      // Submit to API
-      const response = await donationAPI.createDonation(donationData);
+      // Check if user role is correct
+      const userRole = userData?.role?.toUpperCase() || '';
+      if (userRole !== 'DONOR') {
+        // Attempt to update role via auth context (this is more reliable)
+        try {
+          await toast.promise(
+            updateUserRole('donor'),
+            {
+              loading: 'Setting your role as donor...',
+              success: 'Role updated to donor!',
+              error: 'Failed to set role as donor'
+            }
+          );
+          
+          // Give Firebase a moment to update permissions
+          await new Promise(resolve => setTimeout(resolve, 500));
+        } catch (roleError) {
+          console.error("Failed to update role:", roleError);
+          // Still try to create the donation - the API will attempt to fix the role again
+        }
+      }
       
-      // Create local display data for UI
+      // Call the API to create the donation
+      const response = await donationAPI.createDonation({
+        bloodType: formData.bloodType,
+        contactNumber: formData.contactNumber,
+        availability: formData.availability,
+        location: formData.location,
+        additionalInfo: formData.additionalInfo,
+        status: 'available'
+      });
+      
+      console.log('Donation created successfully:', response);
+      
+      // Format the data for the parent component
       const newDonation: DonationListingData = {
-        id: `donation-${response.id || Date.now()}`,
-        donorName,
-        bloodType,
-        contactNumber,
-        availability,
-        location,
-        additionalInfo,
-        listedOn: new Date().toLocaleDateString('en-US', { 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
+        id: `donation-${response.id}`,
+        donorName: response.donorName || 'You',
+        bloodType: formData.bloodType,
+        contactNumber: formData.contactNumber,
+        availability: formData.availability,
+        location: formData.location,
+        additionalInfo: formData.additionalInfo,
+        listedOn: new Date().toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
         }),
         status: 'available'
       };
       
-      // Notify success
-      toast.success('Donation listed successfully!');
-      
+      // Call the parent component's onSubmit handler
       onSubmit(newDonation);
       
-      // Reset form
-      setDonorName('');
-      setBloodType('');
-      setContactNumber('');
-      setAvailability('');
-      setLocation('');
-      setAdditionalInfo('');
+      toast.success('Donation listed successfully!');
+      
+      // Reset form and close modal
+      setFormData({
+        bloodType: '',
+        contactNumber: '',
+        availability: '',
+        location: '',
+        additionalInfo: ''
+      });
       
       onClose();
-    } catch (error) {
-      console.error('Error creating donation:', error);
-      toast.error('Failed to list donation. Please try again.');
+    } catch (error: any) {
+      console.error('Error listing donation:', error);
+      const errorMessage = error.message || 'Failed to list donation. Please try again.';
+      
+      // Check for specific error messages and provide helpful actions
+      if (errorMessage.includes('role') || errorMessage.includes('donor')) {
+        setApiError(`${errorMessage} Please select "Be a Donor" at the top of your dashboard and try again.`);
+        toast.error('You need to be a donor to create listings');
+      } else if (errorMessage.includes('permission')) {
+        setApiError('Permission denied. Please make sure you have selected the Donor role and try again.');
+        toast.error('Permission denied. Please update your role');
+      } else {
+        setApiError(errorMessage);
+        toast.error('Failed to list donation. Please try again');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -92,151 +171,144 @@ export default function DonationListingForm({ isOpen, onClose, onSubmit }: Donat
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-lg shadow-lg w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-        <div className="flex justify-between items-center p-6 border-b border-[#E1E8ED]">
-          <h2 className="text-2xl font-bold text-[#2C3E50]">List Your Blood Donation</h2>
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-[#1E1E1E] rounded-lg shadow-xl w-full max-w-lg border border-[#333333]">
+        <div className="flex justify-between items-center p-6 border-b border-[#333333]">
+          <h2 className="text-xl font-semibold text-white">List Your Donation</h2>
           <button 
             onClick={onClose}
-            className="text-[#7F8C8D] hover:text-[#2C3E50] transition-colors"
+            className="text-gray-400 hover:text-white transition-colors"
           >
-            <X className="h-6 w-6" />
+            <X className="h-5 w-5" />
           </button>
         </div>
         
-        <form onSubmit={handleSubmit} className="p-6 space-y-6">
-          {/* Donor Name */}
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {/* Display API errors */}
+          {apiError && (
+            <div className="bg-red-900/20 border border-red-800 rounded-md p-3 flex items-start">
+              <AlertCircle className="h-5 w-5 text-red-500 mr-2 mt-0.5 flex-shrink-0" />
+              <p className="text-red-400 text-sm">{apiError}</p>
+            </div>
+          )}
+          
           <div className="space-y-2">
-            <label className="block text-[#2C3E50] font-medium">
-              <div className="flex items-center space-x-2 mb-1">
-                <User className="h-4 w-4 text-[#1E88E5]" />
-                <span>Your Name</span>
-              </div>
-              <input 
-                type="text" 
-                value={donorName}
-                onChange={(e) => setDonorName(e.target.value)}
-                required
-                placeholder="Enter your full name"
-                className="w-full px-4 py-2 bg-[#F8FAFC] border border-[#E1E8ED] rounded-md text-[#2C3E50] focus:outline-none focus:ring-1 focus:ring-[#1E88E5]"
-              />
+            <label htmlFor="bloodType" className="block text-sm font-medium text-gray-400">
+              Blood Type <span className="text-red-500">*</span>
             </label>
+            <select
+              id="bloodType"
+              name="bloodType"
+              value={formData.bloodType}
+              onChange={handleChange}
+              className={`w-full bg-[#262626] border ${errors.bloodType ? 'border-red-800' : 'border-[#333333]'} rounded-md px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-[#9C27B0] focus:border-[#9C27B0]`}
+            >
+              <option value="">Select Blood Type</option>
+              <option value="A+">A+</option>
+              <option value="A-">A-</option>
+              <option value="B+">B+</option>
+              <option value="B-">B-</option>
+              <option value="AB+">AB+</option>
+              <option value="AB-">AB-</option>
+              <option value="O+">O+</option>
+              <option value="O-">O-</option>
+            </select>
+            {errors.bloodType && <p className="text-red-500 text-xs mt-1">{errors.bloodType}</p>}
           </div>
           
-          {/* Blood Type */}
           <div className="space-y-2">
-            <label className="block text-[#2C3E50] font-medium">
-              <div className="flex items-center space-x-2 mb-1">
-                <Droplet className="h-4 w-4 text-[#1E88E5]" />
-                <span>Blood Type</span>
-              </div>
-              <select 
-                value={bloodType}
-                onChange={(e) => setBloodType(e.target.value)}
-                required
-                className="w-full px-4 py-2 bg-[#F8FAFC] border border-[#E1E8ED] rounded-md text-[#2C3E50] focus:outline-none focus:ring-1 focus:ring-[#1E88E5]"
-              >
-                <option value="" className="bg-[#F8FAFC]">Select your blood type</option>
-                {bloodTypes.map((type) => (
-                  <option key={type} value={type} className="bg-[#F8FAFC]">
-                    {type}
-                  </option>
-                ))}
-              </select>
+            <label htmlFor="contactNumber" className="block text-sm font-medium text-gray-400">
+              Contact Number <span className="text-red-500">*</span>
             </label>
+            <input
+              id="contactNumber"
+              name="contactNumber"
+              type="tel"
+              value={formData.contactNumber}
+              onChange={handleChange}
+              placeholder="Your contact number"
+              className={`w-full bg-[#262626] border ${errors.contactNumber ? 'border-red-800' : 'border-[#333333]'} rounded-md px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-[#9C27B0] focus:border-[#9C27B0]`}
+            />
+            {errors.contactNumber && <p className="text-red-500 text-xs mt-1">{errors.contactNumber}</p>}
           </div>
           
-          {/* Contact Number */}
           <div className="space-y-2">
-            <label className="block text-[#2C3E50] font-medium">
-              <div className="flex items-center space-x-2 mb-1">
-                <Phone className="h-4 w-4 text-[#1E88E5]" />
-                <span>Contact Number</span>
-              </div>
-              <input 
-                type="tel" 
-                value={contactNumber}
-                onChange={(e) => setContactNumber(e.target.value)}
-                required
-                placeholder="Enter your contact number"
-                className="w-full px-4 py-2 bg-[#F8FAFC] border border-[#E1E8ED] rounded-md text-[#2C3E50] focus:outline-none focus:ring-1 focus:ring-[#1E88E5]"
-              />
+            <label htmlFor="availability" className="block text-sm font-medium text-gray-400">
+              Availability <span className="text-red-500">*</span>
             </label>
+            <input
+              id="availability"
+              name="availability"
+              type="text"
+              value={formData.availability}
+              onChange={handleChange}
+              placeholder="e.g., Weekdays after 5pm, Weekends only"
+              className={`w-full bg-[#262626] border ${errors.availability ? 'border-red-800' : 'border-[#333333]'} rounded-md px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-[#9C27B0] focus:border-[#9C27B0]`}
+            />
+            {errors.availability && <p className="text-red-500 text-xs mt-1">{errors.availability}</p>}
           </div>
           
-          {/* Availability */}
           <div className="space-y-2">
-            <label className="block text-[#2C3E50] font-medium">
-              <div className="flex items-center space-x-2 mb-1">
-                <Calendar className="h-4 w-4 text-[#1E88E5]" />
-                <span>Availability</span>
-              </div>
-              <input 
-                type="text" 
-                value={availability}
-                onChange={(e) => setAvailability(e.target.value)}
-                required
-                placeholder="e.g., Weekdays 9AM-5PM, Weekends only, etc."
-                className="w-full px-4 py-2 bg-[#F8FAFC] border border-[#E1E8ED] rounded-md text-[#2C3E50] focus:outline-none focus:ring-1 focus:ring-[#1E88E5]"
-              />
+            <label htmlFor="location" className="block text-sm font-medium text-gray-400">
+              Location <span className="text-red-500">*</span>
             </label>
+            <input
+              id="location"
+              name="location"
+              type="text"
+              value={formData.location}
+              onChange={handleChange}
+              placeholder="City, State or Hospital/Clinic Name"
+              className={`w-full bg-[#262626] border ${errors.location ? 'border-red-800' : 'border-[#333333]'} rounded-md px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-[#9C27B0] focus:border-[#9C27B0]`}
+            />
+            {errors.location && <p className="text-red-500 text-xs mt-1">{errors.location}</p>}
           </div>
           
-          {/* Location */}
           <div className="space-y-2">
-            <label className="block text-[#2C3E50] font-medium">
-              <div className="flex items-center space-x-2 mb-1">
-                <MapPin className="h-4 w-4 text-[#1E88E5]" />
-                <span>Preferred Donation Location</span>
-              </div>
-              <input 
-                type="text" 
-                value={location}
-                onChange={(e) => setLocation(e.target.value)}
-                required
-                placeholder="Enter your preferred donation location"
-                className="w-full px-4 py-2 bg-[#F8FAFC] border border-[#E1E8ED] rounded-md text-[#2C3E50] focus:outline-none focus:ring-1 focus:ring-[#1E88E5]"
-              />
+            <label htmlFor="additionalInfo" className="block text-sm font-medium text-gray-400">
+              Additional Information <span className="text-gray-500">(optional)</span>
             </label>
+            <textarea
+              id="additionalInfo"
+              name="additionalInfo"
+              value={formData.additionalInfo}
+              onChange={handleChange}
+              rows={3}
+              placeholder="Any additional details you want to share"
+              className="w-full bg-[#262626] border border-[#333333] rounded-md px-3 py-2 text-white focus:outline-none focus:ring-1 focus:ring-[#9C27B0] focus:border-[#9C27B0]"
+            />
           </div>
           
-          {/* Additional Information */}
-          <div className="space-y-2">
-            <label className="block text-[#2C3E50] font-medium">
-              <div className="flex items-center space-x-2 mb-1">
-                <FileText className="h-4 w-4 text-[#1E88E5]" />
-                <span>Additional Information (Optional)</span>
-              </div>
-              <textarea 
-                value={additionalInfo}
-                onChange={(e) => setAdditionalInfo(e.target.value)}
-                placeholder="Any health conditions, preferences, or other information we should know?"
-                rows={3}
-                className="w-full px-4 py-2 bg-[#F8FAFC] border border-[#E1E8ED] rounded-md text-[#2C3E50] focus:outline-none focus:ring-1 focus:ring-[#1E88E5]"
-              />
-            </label>
-          </div>
-          
-          {/* Footer with actions */}
-          <div className="flex justify-end space-x-3 pt-4 border-t border-[#E1E8ED]">
-            <button 
+          <div className="flex justify-end space-x-3 pt-4">
+            <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-transparent border border-[#E1E8ED] text-[#2C3E50] hover:bg-[#F8FAFC] rounded-md transition-colors"
-              disabled={isSubmitting}
+              className="px-4 py-2 border border-[#333333] rounded-md text-white hover:bg-[#262626] transition-colors"
             >
               Cancel
             </button>
-            <button 
+            <button
               type="submit"
               disabled={isSubmitting}
-              className="px-6 py-2 bg-[#1E88E5] hover:bg-[#1976D2] text-white rounded-md transition-colors disabled:opacity-50"
+              className="px-4 py-2 bg-[#9C27B0] hover:bg-[#7B1FA2] text-white rounded-md transition-colors flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isSubmitting ? 'Submitting...' : 'List Donation'}
+              {isSubmitting ? (
+                <>
+                  <div className="h-4 w-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <Save className="h-4 w-4 mr-2" />
+                  List Donation
+                </>
+              )}
             </button>
           </div>
         </form>
       </div>
     </div>
   );
-} 
+};
+
+export default DonationListingForm;
