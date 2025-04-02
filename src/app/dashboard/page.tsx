@@ -17,7 +17,7 @@ import { toast, Toaster } from 'react-hot-toast';
 
 export default function Dashboard() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, userData } = useAuth();
   const [open, setOpen] = useState(false);
   const [showDonationModal, setShowDonationModal] = useState(false);
   const [showListingModal, setShowListingModal] = useState(false);
@@ -34,66 +34,109 @@ export default function Dashboard() {
     { id: 3, type: 'update', message: 'Blood inventory update: A+ type is low', time: '3 hours ago' }
   ]);
   const [userNotifications, setUserNotifications] = useState<any[]>([]);
+  const [processedDonationIds, setProcessedDonationIds] = useState<Set<string>>(new Set());
 
   // Update userType when user changes
   useEffect(() => {
     if (user?.role) {
-      setUserType(user.role.toLowerCase() as 'donor' | 'recipient');
+      const newUserType = user.role.toLowerCase() as 'donor' | 'recipient';
+      
+      // Only update if it actually changed to avoid refresh loops
+      if (newUserType !== userType) {
+        console.log(`User role changed from ${userType} to ${newUserType}, updating...`);
+        setUserType(newUserType);
+      }
     }
-  }, [user]);
+  }, [user, userType]);
 
   // Load donations from backend API
   useEffect(() => {
     const fetchDonations = async () => {
+      if (!user) {
+        console.log("No user logged in, skipping donation fetch");
+        setDonations([]);
+        setIsLoading(false);
+        return;
+      }
+      
+      console.log("Starting donation fetch process with user:", user.uid);
       setIsLoading(true);
+      
       try {
-        let donationData;
+        console.log(`Fetching donations as ${userType}...`);
+        let donationData: any[] = [];
         
         if (userType === 'donor') {
-          // Fetch donor's own donations
+          // Fetch donor's own donations (including any pending ones)
+          console.log("Fetching donor's donations from Firestore with UID:", user.uid);
           donationData = await donationAPI.getMyDonations();
+          console.log("Raw donor donations received:", donationData);
         } else {
           // Fetch available donations for recipients
+          console.log("Fetching available donations for recipient");
           donationData = await donationAPI.getAvailableDonations();
+          console.log("Raw available donations received:", donationData);
         }
         
-        // Transform API data to match our frontend model
-        const transformedDonations = donationData.map((donation: any) => ({
-          id: `donation-${donation.id}`,
-          donorName: donation.donor?.firstName + ' ' + donation.donor?.lastName || 'Anonymous',
-          bloodType: donation.bloodType,
-          contactNumber: donation.contactNumber,
-          availability: donation.availability,
-          location: donation.location,
-          additionalInfo: donation.additionalInfo || '',
-          listedOn: new Date(donation.listedOn).toLocaleDateString('en-US', {
-            year: 'numeric',
-            month: 'long',
-            day: 'numeric'
-          }),
-          status: donation.status.toLowerCase()
-        }));
+        if (!donationData) {
+          console.error("No donation data returned from API");
+          donationData = [];
+        } else if (!Array.isArray(donationData)) {
+          console.error("Invalid donation data format (not an array):", donationData);
+          donationData = [];
+        }
         
+        console.log("Processing donation data of length:", donationData.length);
+        
+        // Transform API data to match our frontend model with better error handling
+        const transformedDonations = donationData
+          .filter(donation => donation !== null && donation !== undefined)
+          .map((donation: any) => {
+            try {
+              // Convert 'pending' or 'requested' status consistently
+              let status = (donation.status || 'available').toLowerCase();
+              // Ensure we normalize 'requested' to 'pending' for consistency
+              if (status === 'requested') status = 'pending';
+              
+              return {
+                id: `donation-${donation.id || 'unknown'}`,
+                donorName: donation.donorName || 'Anonymous',
+                bloodType: donation.bloodType || 'Unknown',
+                contactNumber: donation.contactNumber || 'N/A',
+                availability: donation.availability || 'N/A',
+                location: donation.location || 'N/A',
+                additionalInfo: donation.additionalInfo || '',
+                listedOn: donation.listedOn ? new Date(donation.listedOn).toLocaleDateString('en-US', {
+                  year: 'numeric',
+                  month: 'long',
+                  day: 'numeric'
+                }) : 'Unknown date',
+                status: status,
+                requesterId: donation.recipientId || '',
+                recipientName: donation.recipientName || ''
+              };
+            } catch (err) {
+              console.error("Error transforming donation:", err, donation);
+              return null;
+            }
+          })
+          .filter((item): item is typeof item => item !== null) as DonationListingData[];
+        
+        console.log("Processed transformed donations:", transformedDonations);
         setDonations(transformedDonations);
       } catch (error) {
         console.error('Error fetching donations:', error);
-        // Fallback to localStorage if API fails
-        const savedDonations = localStorage.getItem('bloodconnect_donations');
-        if (savedDonations) {
-          setDonations(JSON.parse(savedDonations));
-        }
+        toast.error("Failed to load donations. Please refresh and try again.");
+        // Set empty array instead of keeping old state to avoid stale data
+        setDonations([]);
       } finally {
         setIsLoading(false);
       }
     };
 
+    console.log("Donation fetch useEffect triggered - user:", user?.uid, "userType:", userType);
     fetchDonations();
-  }, [userType]);
-
-  // Save donations to localStorage when they change
-  useEffect(() => {
-    localStorage.setItem('bloodconnect_donations', JSON.stringify(donations));
-  }, [donations]);
+  }, [user, userType]);
 
   interface Appointment {
     id: number;
@@ -121,28 +164,43 @@ export default function Dashboard() {
   // Fetch notifications when component mounts
   useEffect(() => {
     const fetchNotifications = async () => {
-      if (user) {
-        try {
-          const notificationData = await donationAPI.getNotifications();
+      if (!user) return;
+      
+      try {
+        console.log("Fetching notifications for user:", user.uid);
+        const notificationData = await donationAPI.getNotifications();
+        
+        // Only update state if we have valid data
+        if (Array.isArray(notificationData)) {
           setUserNotifications(notificationData);
           
-          // Check if there are unread notifications and update the UI accordingly
+          // Check if there are unread notifications
           const unreadCount = notificationData.filter(notification => {
-            // First check if notification exists
             if (!notification) return false;
-            // Then check if it has a read property that can be accessed
             return typeof notification === 'object' && 'read' in notification && !notification.read;
           }).length;
+          
           if (unreadCount > 0) {
-            // You could add a badge or notification indicator here
+            console.log(`User has ${unreadCount} unread notifications`);
           }
-        } catch (error) {
-          console.error('Error fetching notifications:', error);
+        }
+      } catch (error: any) {
+        console.error('Error fetching notifications:', error);
+        
+        // Handle index errors gracefully
+        if (error.message && error.message.includes('requires an index')) {
+          toast.error(
+            'We\'re setting up notifications. Please try again in a few minutes.', 
+            { duration: 4000 }
+          );
         }
       }
     };
     
-    fetchNotifications();
+    // Only fetch if user is logged in
+    if (user?.uid) {
+      fetchNotifications();
+    }
   }, [user]);
 
   const links = [
@@ -173,7 +231,6 @@ export default function Dashboard() {
     },
   ];
 
-  // Function handlers for button clicks
   const handleScheduleDonation = () => {
     setAppointmentToReschedule(null);
     setShowDonationModal(true);
@@ -206,7 +263,6 @@ export default function Dashboard() {
 
   const handleViewBloodBanks = () => {
     alert('Showing nearby blood banks...');
-    // In a real app, this would navigate to a page showing nearby blood banks
   };
 
   const handleResetData = () => {
@@ -229,7 +285,6 @@ export default function Dashboard() {
     });
     
     if (appointmentToReschedule) {
-      // Update existing appointment
       setAppointments(prev => 
         prev.map(apt => 
           apt.id === appointmentToReschedule.id 
@@ -244,7 +299,6 @@ export default function Dashboard() {
       );
       alert(`Appointment rescheduled!\nDate: ${formattedDate}\nTime: ${data.time}\nLocation: ${data.location}`);
     } else {
-      // Create new appointment
       const newAppointment: Appointment = {
         id: Date.now(),
         date: formattedDate,
@@ -264,170 +318,265 @@ export default function Dashboard() {
     setShowListingModal(true);
   };
 
-  const handleListingSubmit = async (donationData: DonationListingData) => {
-    try {
-      // Add the new donation to the local state
-      setDonations(prevDonations => [donationData, ...prevDonations]);
-      
-      // Save to localStorage as fallback
-      const updatedDonations = [donationData, ...donations];
-      localStorage.setItem('bloodconnect_donations', JSON.stringify(updatedDonations));
-      
-      // Ensure we update the count of listed donations for stats
-      if (donationData.status === 'available') {
-        // Update donor stats
-        const newDonorStats = {
-          ...donorStats,
-          listedDonations: donorStats.listedDonations + 1
-        };
+  const deduplicateDonations = (donationsList: DonationListingData[]): DonationListingData[] => {
+    const uniqueDonations: DonationListingData[] = [];
+    const seenIds = new Set<string>();
+    
+    for (const donation of donationsList) {
+      if (!seenIds.has(donation.id)) {
+        seenIds.add(donation.id);
+        uniqueDonations.push(donation);
+      } else {
+        console.log(`Skipping duplicate donation with ID: ${donation.id}`);
       }
+    }
+    
+    return uniqueDonations;
+  };
+
+  const handleListingSubmit = async (donationData: DonationListingData) => {
+    // First close the modal to prevent multiple submissions
+    setShowListingModal(false);
+    
+    const toastId = toast.loading('Creating new donation listing...');
+    
+    try {
+      // Call the API to create the donation
+      await donationAPI.createDonation({
+        bloodType: donationData.bloodType,
+        contactNumber: donationData.contactNumber,
+        availability: donationData.availability,
+        location: donationData.location,
+        additionalInfo: donationData.additionalInfo,
+        status: 'available'
+      });
       
-      // Show success message
-      toast.success('Donation listed successfully!');
-    } catch (error) {
+      // Update toast to success
+      toast.success('Donation listed successfully!', { id: toastId });
+      
+      // Wait before refreshing to ensure database consistency
+      setTimeout(() => {
+        refreshUserDataAndDonations();
+      }, 1000);
+    } catch (error: any) {
       console.error('Error saving donation:', error);
-      toast.error('Failed to save donation data');
+      
+      // Handle index errors gracefully
+      if (error.message && error.message.includes('requires an index')) {
+        toast.error(
+          'Your donation was saved, but we\'re setting up the database. Please wait a moment and refresh.',
+          { id: toastId, duration: 5000 }
+        );
+        
+        // Try refreshing after a delay to see if indexes are ready
+        setTimeout(() => refreshUserDataAndDonations(), 5000);
+      } else {
+        toast.error('Failed to save donation data', { id: toastId });
+      }
     }
   };
 
   const handleDonationStatusChange = async (donationId: string, newStatus: 'available' | 'pending' | 'completed') => {
     try {
-      const id = donationId.split('-')[1]; // Extract numeric ID as a string
+      const id = donationId.split('-')[1];
+      
+      toast.loading('Updating donation status...', { id: 'status-toast' });
 
       if (newStatus === 'completed') {
-        await donationAPI.confirmDonation(id); // Pass `id` as a string
+        await donationAPI.confirmDonation(id);
       } else if (newStatus === 'available' && userType === 'recipient') {
-        await donationAPI.cancelRequest(id); // Pass `id` as a string
+        await donationAPI.cancelRequest(id);
       }
 
-      // Update local state
-      setDonations(donations.map(donation =>
-        donation.id === donationId
-          ? { ...donation, status: newStatus }
-          : donation
-      ));
-
-      // Update localStorage for fallback
-      localStorage.setItem('bloodconnect_donations', JSON.stringify(
-        donations.map(donation =>
-          donation.id === donationId
-            ? { ...donation, status: newStatus }
-            : donation
-        )
-      ));
+      setTimeout(() => {
+        refreshUserDataAndDonations();
+        toast.success('Status updated successfully', { id: 'status-toast' });
+      }, 1000);
+      
     } catch (error) {
       console.error('Error updating donation status:', error);
+      toast.error('Failed to update status', { id: 'status-toast' });
     }
   };
 
   const handleRequestDonation = async (donationId: string) => {
     try {
-      const id = donationId.split('-')[1]; // Extract numeric ID as string
+      const id = donationId.split('-')[1];
+      
+      toast.loading('Requesting donation...', { id: 'request-toast' });
       await donationAPI.requestDonation(id);
       
-      // Update local state
-      setDonations(donations.map(donation => 
-        donation.id === donationId 
-          ? { ...donation, status: 'pending' } 
-          : donation
-      ));
+      setTimeout(() => {
+        refreshUserDataAndDonations();
+        toast.success('Request sent successfully', { id: 'request-toast' });
+      }, 1000);
       
-      // Update localStorage for fallback
-      localStorage.setItem('bloodconnect_donations', JSON.stringify(
-        donations.map(donation => 
-          donation.id === donationId 
-            ? { ...donation, status: 'pending' } 
-            : donation
-        )
-      ));
     } catch (error) {
       console.error('Error requesting donation:', error);
+      toast.error('Failed to request donation', { id: 'request-toast' });
     }
   };
 
   const handleAcceptDonationRequest = async (donationId: string, recipientId: string) => {
     try {
-      const id = donationId.split('-')[1]; // Extract numeric ID as string
+      const id = donationId.split('-')[1];
+      
+      toast.loading('Accepting request...', { id: 'accept-toast' });
       await donationAPI.acceptDonationRequest(id, recipientId);
       
-      // Update local state to show the donation as accepted
-      setDonations(donations.map(donation => 
-        donation.id === donationId 
-          ? { ...donation, status: 'accepted' } 
-          : donation
-      ));
+      setTimeout(() => {
+        refreshUserDataAndDonations();
+        toast.success('Request accepted successfully', { id: 'accept-toast' });
+      }, 1000);
       
-      // Show a success notification
-      toast.success('You have accepted the donation request!');
-      
-      // Refresh data to ensure everything is up-to-date
-      refreshUserDataAndDonations();
     } catch (error) {
       console.error('Error accepting donation request:', error);
-      toast.error('Failed to accept donation request. Please try again.');
+      toast.error('Failed to accept request', { id: 'accept-toast' });
     }
   };
 
-  // Add this new function to force-reload user data and donations
+  const handleRejectDonationRequest = async (donationId: string, recipientId: string) => {
+    try {
+      const id = donationId.split('-')[1];
+      
+      toast.loading('Rejecting request...', { id: 'reject-toast' });
+      await donationAPI.rejectDonationRequest(id, recipientId);
+      
+      setTimeout(() => {
+        refreshUserDataAndDonations();
+        toast.success('Request rejected successfully', { id: 'reject-toast' });
+      }, 1000);
+      
+    } catch (error) {
+      console.error('Error rejecting donation request:', error);
+      toast.error('Failed to reject request', { id: 'reject-toast' });
+    }
+  };
+
   const refreshUserDataAndDonations = async () => {
+    if (!user) {
+      console.log("Cannot refresh - no user logged in");
+      return;
+    }
+    
     setIsLoading(true);
+    const toastId = toast.loading('Refreshing data...');
+    
     try {
       // First refresh user data from Firestore
+      console.log("Fetching latest user profile...");
       const userData = await userAPI.getProfile();
       
       // Make sure the userType state is updated based on the latest user role
-      if (userData && typeof userData === 'object' && 'role' in userData && typeof userData.role === 'string') {
-        const role = userData.role.toLowerCase() as 'donor' | 'recipient';
-        setUserType(role);
+      if (userData && typeof userData === 'object' && 'role' in userData) {
+        const newRole = (userData.role as string).toLowerCase() as 'donor' | 'recipient';
+        if (newRole !== userType) {
+          setUserType(newRole);
+        }
       }
       
       // Then reload the donations based on current user type
-      let donationData;
-      if (userType === 'donor') {
-        donationData = await donationAPI.getMyDonations();
-      } else {
-        donationData = await donationAPI.getAvailableDonations();
+      let donationData: any[] = [];
+      
+      try {
+        if (userType === 'donor') {
+          donationData = await donationAPI.getMyDonations();
+        } else {
+          donationData = await donationAPI.getAvailableDonations();
+        }
+      } catch (apiError) {
+        console.error("API error fetching donations:", apiError);
+        donationData = [];
       }
       
-      // Transform and update the donations state
-      const transformedDonations = donationData.map((donation: any) => ({
-        id: `donation-${donation.id}`,
-        donorName: donation.donorName || 'Anonymous',
-        bloodType: donation.bloodType,
-        contactNumber: donation.contactNumber,
-        availability: donation.availability,
-        location: donation.location,
-        additionalInfo: donation.additionalInfo || '',
-        listedOn: new Date(donation.listedOn).toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        }),
-        status: donation.status.toLowerCase()
-      }));
+      if (!donationData || !Array.isArray(donationData)) {
+        donationData = [];
+      }
       
-      setDonations(transformedDonations);
+      // Transform and update the donations state with deduplication
+      const transformedDonations = donationData
+        .filter(donation => donation !== null && donation !== undefined)
+        .map((donation: any) => {
+          try {
+            let status = (donation.status || 'available').toLowerCase();
+            if (status === 'requested') status = 'pending';
+            
+            return {
+              id: `donation-${donation.id || 'unknown'}`,
+              donorName: donation.donorName || 'Anonymous',
+              bloodType: donation.bloodType || 'Unknown',
+              contactNumber: donation.contactNumber || 'N/A',
+              availability: donation.availability || 'N/A',
+              location: donation.location || 'N/A',
+              additionalInfo: donation.additionalInfo || '',
+              listedOn: donation.listedOn ? new Date(donation.listedOn).toLocaleDateString('en-US', {
+                year: 'numeric',
+                month: 'long',
+                day: 'numeric'
+              }) : 'Unknown date',
+              status: status,
+              requesterId: donation.recipientId || '',
+              recipientName: donation.recipientName || ''
+            };
+          } catch (transformError) {
+            console.error("Error transforming donation item:", transformError);
+            return null;
+          }
+        })
+        .filter((item): item is NonNullable<typeof item> => item !== null);
       
-      toast.success('Data refreshed successfully');
+      // Deduplicate the donations
+      const uniqueDonations = deduplicateDonations(transformedDonations);
+      console.log(`Filtered ${transformedDonations.length - uniqueDonations.length} duplicate donations`);
+      
+      setDonations(uniqueDonations);
+      toast.success('Data refreshed successfully', { id: toastId });
     } catch (error) {
       console.error('Error refreshing data:', error);
-      toast.error('Failed to refresh data');
+      toast.error('Failed to refresh data. Please try again.', { id: toastId });
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Add this useEffect to refresh data when userType changes
   useEffect(() => {
+    let refreshTimeout: NodeJS.Timeout | null = null;
+    
+    const handleRefreshEvent = () => {
+      console.log("Donation data changed event received, scheduling refresh...");
+      
+      // Clear any existing timeout to debounce multiple rapid events
+      if (refreshTimeout) {
+        clearTimeout(refreshTimeout);
+      }
+      
+      // Schedule a new refresh after a short delay
+      refreshTimeout = setTimeout(() => {
+        console.log("Executing debounced refresh");
+        refreshUserDataAndDonations();
+        refreshTimeout = null;
+      }, 500);
+    };
+    
+    window.addEventListener('donation-data-changed', handleRefreshEvent);
+    
+    return () => {
+      window.removeEventListener('donation-data-changed', handleRefreshEvent);
+      if (refreshTimeout) {
+        clearTimeout(refreshTimeout);
+      }
+    };
+  }, [user, userType]);
+
+  const retryLoadDonations = () => {
+    toast.loading('Retrying donation load...');
     refreshUserDataAndDonations();
-  }, [userType]);
+  };
 
-  // Filter donations based on user type
   const userDonations = userType === 'donor' 
-    ? donations 
-    : donations.filter(donation => donation.status === 'available');
+    ? donations // Show all donations for donors, including pending ones
+    : donations.filter(donation => donation.status === 'available'); // Only show available for recipients
 
-  // Calculate donation stats
   const donorStats = {
     totalDonations: donations.filter(d => d.status === 'completed').length,
     listedDonations: donations.filter(d => d.status === 'available').length
@@ -440,7 +589,6 @@ export default function Dashboard() {
 
   return (
     <div className="min-h-screen bg-[#121212] text-white">
-      {/* Toaster for notifications */}
       <Toaster position="top-right" />
       
       <div className="flex h-screen">
@@ -470,7 +618,6 @@ export default function Dashboard() {
           </SidebarBody>
         </Sidebar>
 
-        {/* Main Content */}
         <main className="flex-1 overflow-y-auto">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <div className="flex justify-between items-center mb-8">
@@ -478,7 +625,6 @@ export default function Dashboard() {
                 Welcome to Your <span className="text-[#9C27B0]">Dashboard</span>
               </h2>
               
-              {/* Notification Bell */}
               <div className="relative">
                 <Bell className="h-6 w-6 text-[#9C27B0] cursor-pointer" />
                 <span className="absolute -top-1 -right-1 bg-[#9C27B0] text-white text-xs w-4 h-4 flex items-center justify-center rounded-full">
@@ -487,10 +633,8 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* User Type Selector - Always shows after login */}
             <UserTypeSelector userType={userType} setUserType={setUserType} />
 
-            {/* Stats Grid */}
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-6 mb-8">
               <div className="p-6 rounded-lg bg-[#1E1E1E] border border-[#333333] shadow-sm">
                 <div className="flex items-center space-x-3">
@@ -548,38 +692,80 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* Donations Section */}
             <div className="mb-8">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-xl font-semibold text-white">
                   {userType === 'donor' ? 'Your Listed Donations' : 'Available Donations'}
                 </h3>
                 
-                {userType === 'donor' && (
+                <div className="flex space-x-2">
                   <button 
-                    onClick={handleListDonation}
-                    className="bg-[#9C27B0] hover:bg-[#7B1FA2] text-white py-2 px-4 rounded-md transition-colors flex items-center"
+                    onClick={() => refreshUserDataAndDonations()}
+                    className="bg-[#1E1E1E] hover:bg-[#333333] text-white py-2 px-4 rounded-md transition-colors flex items-center"
+                    disabled={isLoading}
                   >
-                    <Plus className="h-4 w-4 mr-2" />
-                    List Donation
+                    {isLoading ? (
+                      <div className="h-4 w-4 border-2 border-[#9C27B0] border-t-transparent rounded-full animate-spin mr-2"></div>
+                    ) : (
+                      <svg className="h-4 w-4 mr-2" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M4 4V9H4.58152M19.9381 11C19.446 7.05369 16.0796 4 12 4C8.64262 4 5.76829 6.06817 4.58152 9M4.58152 9H9M20 20V15H19.4185M19.4185 15C18.2317 17.9318 15.3574 20 12 20C7.92038 20 4.55399 16.9463 4.06189 13M19.4185 15H15" 
+                          stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    )}
+                    Refresh
                   </button>
-                )}
+                  
+                  {userType === 'donor' && (
+                    <button 
+                      onClick={handleListDonation}
+                      className="bg-[#9C27B0] hover:bg-[#7B1FA2] text-white py-2 px-4 rounded-md transition-colors flex items-center"
+                    >
+                      <Plus className="h-4 w-4 mr-2" />
+                      List Donation
+                    </button>
+                  )}
+                </div>
               </div>
               
-              <DonationsList 
-                donations={userDonations} 
-                userType={userType}
-                onStatusChange={handleDonationStatusChange}
-                onRequestDonation={handleRequestDonation}
-                onAcceptRequest={handleAcceptDonationRequest}
-              />
+              {isLoading ? (
+                <div className="p-12 flex flex-col items-center justify-center bg-[#1E1E1E] border border-[#333333] rounded-lg">
+                  <div className="h-12 w-12 border-4 border-[#9C27B0] border-t-transparent rounded-full animate-spin mb-4"></div>
+                  <p className="text-gray-400">Loading donations...</p>
+                </div>
+              ) : donations.length === 0 ? (
+                <div className="p-8 text-center bg-[#1E1E1E] border border-[#333333] rounded-lg">
+                  <Heart className="h-12 w-12 mx-auto text-[#9C27B0] mb-4" />
+                  <h3 className="text-xl font-semibold text-white mb-2">No donations found</h3>
+                  <p className="text-gray-400 mb-6">
+                    {userType === 'donor' 
+                      ? 'You have not listed any donations yet. Click the "List Donation" button to get started.'
+                      : 'There are no blood donations available at the moment. Please check back later.'}
+                  </p>
+                  <button
+                    onClick={retryLoadDonations}
+                    className="px-4 py-2 bg-[#9C27B0] hover:bg-[#7B1FA2] text-white rounded-md transition-colors inline-flex items-center"
+                  >
+                    <svg className="h-4 w-4 mr-2" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M4 4V9H4.58152M19.9381 11C19.446 7.05369 16.0796 4 12 4C8.64262 4 5.76829 6.06817 4.58152 9M4.58152 9H9M20 20V15H19.4185M19.4185 15C18.2317 17.9318 15.3574 20 12 20C7.92038 20 4.55399 16.9463 4.06189 13M19.4185 15H15" 
+                        stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    </svg>
+                    Retry Loading Donations
+                  </button>
+                </div>
+              ) : (
+                <DonationsList 
+                  donations={userDonations} 
+                  userType={userType}
+                  onStatusChange={handleDonationStatusChange}
+                  onRequestDonation={handleRequestDonation}
+                  onAcceptRequest={handleAcceptDonationRequest}
+                  onRejectRequest={handleRejectDonationRequest}
+                />
+              )}
             </div>
 
-            {/* Main Dashboard Content */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {/* Left Column */}
               <div className="space-y-6">
-                {/* Call-to-Action Buttons */}
                 <div className="p-6 rounded-lg bg-[#1E1E1E] border border-[#333333] shadow-sm">
                   <h3 className="text-xl font-semibold text-white mb-4">Quick Actions</h3>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -604,7 +790,6 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                {/* Upcoming Appointments */}
                 <div className="p-6 rounded-lg bg-[#1E1E1E] border border-[#333333] shadow-sm">
                   <h3 className="text-xl font-semibold text-white mb-4">Upcoming Appointments</h3>
                   <div className="space-y-4">
@@ -660,15 +845,13 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {/* Right Column */}
               <div className="space-y-6">
-                {/* Real-Time Notifications */}
                 <div className="p-6 rounded-lg bg-[#1E1E1E] border border-[#333333] shadow-sm">
                   <h3 className="text-xl font-semibold text-white mb-4">Notifications</h3>
                   <div className="space-y-4">
                     {userNotifications.length > 0 ? (
                       userNotifications.slice(0, 3).map((notification) => (
-                        <div key={notification.id} className="flex items-start space-x-4 p-4 rounded-md bg-[#262626] border border-[#333333]">
+                        <div key={notification.id || Math.random()} className="flex items-start space-x-4 p-4 rounded-md bg-[#262626] border border-[#333333]">
                           <div className={`flex-shrink-0 p-2 rounded-md ${
                             notification.type === 'request' 
                               ? 'bg-blue-900' 
@@ -685,13 +868,17 @@ export default function Dashboard() {
                             )}
                           </div>
                           <div className="flex-1">
-                            <p className="text-white font-medium">{notification.title}</p>
-                            <p className="text-gray-400">{notification.message}</p>
+                            <p className="text-white font-medium">{notification.title || 'Notification'}</p>
+                            <p className="text-gray-400">{notification.message || ''}</p>
                             <p className="text-xs text-gray-500 mt-1">
-                              {new Date(notification.createdAt.toDate()).toLocaleString()}
+                              {notification.createdAt?.toDate ? 
+                                new Date(notification.createdAt.toDate()).toLocaleString() : 
+                                typeof notification.createdAt === 'string' ?
+                                  new Date(notification.createdAt).toLocaleString() :
+                                  'Unknown date'}
                             </p>
                           </div>
-                          {!notification.read && (
+                          {notification.read === false && (
                             <div className="h-2 w-2 rounded-full bg-[#9C27B0]"></div>
                           )}
                         </div>
@@ -716,7 +903,6 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                {/* Action Buttons */}
                 <div className="p-6 rounded-lg bg-[#1E1E1E] border border-[#333333] shadow-sm">
                   <h3 className="text-xl font-semibold text-white mb-4">Direct Actions</h3>
                   <div className="space-y-3">
@@ -748,7 +934,6 @@ export default function Dashboard() {
         </main>
       </div>
 
-      {/* Donation Schedule Modal */}
       <DonationScheduleModal 
         isOpen={showDonationModal}
         onClose={() => {
@@ -766,7 +951,6 @@ export default function Dashboard() {
         isRescheduling={!!appointmentToReschedule}
       />
 
-      {/* Donation Listing Modal */}
       <DonationListingForm
         isOpen={showListingModal}
         onClose={() => setShowListingModal(false)}

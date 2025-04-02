@@ -368,102 +368,110 @@ export const bloodRequestAPI = {
 
 // Donation API
 export const donationAPI = {
-  // Get all available donations
+  // Get all available donations - improved error handling
   getAvailableDonations: async () => {
-    const donationsQuery = query(
-      collection(db, 'donations'),
-      where('status', '==', 'available'),
-      orderBy('createdAt', 'desc')
-    );
-    
-    const donationsSnapshot = await getDocs(donationsQuery);
-    return donationsSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }));
-  },
-  
-  // Get all donations (admin only)
-  getAllDonations: async () => {
-    const donationsSnapshot = await getDocs(
-      query(collection(db, 'donations'), orderBy('createdAt', 'desc'))
-    );
-    
-    return donationsSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }));
-  },
-  
-  // Get donations by blood type
-  getDonationsByBloodType: async (bloodType: string) => {
-    const donationsQuery = query(
-      collection(db, 'donations'),
-      where('bloodType', '==', bloodType),
-      where('status', '==', 'available'),
-      orderBy('createdAt', 'desc')
-    );
-    
-    const donationsSnapshot = await getDocs(donationsQuery);
-    return donationsSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }));
-  },
-  
-  // Get current user's donations (as donor)
-  getMyDonations: async () => {
-    const user = auth.currentUser;
-    if (!user) throw new Error('Not authenticated');
-    
     try {
+      console.log("Getting available donations from Firestore");
+      const user = auth.currentUser;
+      if (!user) throw new Error('Not authenticated');
+      
+      try {
+        // First check if the collection exists
+        const donationsRef = collection(db, 'donations');
+        const donationsSnapshot = await getDocs(
+          query(donationsRef, where('status', '==', 'available'), limit(100))
+        );
+        
+        console.log(`Found ${donationsSnapshot.size} available donations`);
+        
+        // Map the data with error handling
+        const donations = donationsSnapshot.docs.map(doc => {
+          try {
+            const data = doc.data();
+            return {
+              id: doc.id,
+              donorId: data.donorId || '',
+              donorName: data.donorName || 'Anonymous',
+              bloodType: data.bloodType || 'Unknown',
+              contactNumber: data.contactNumber || 'N/A',
+              availability: data.availability || 'N/A',
+              location: data.location || 'N/A',
+              additionalInfo: data.additionalInfo || '',
+              status: data.status || 'available',
+              recipientId: data.recipientId || '',
+              createdAt: data.createdAt?.toDate?.() || new Date(),
+              listedOn: data.listedOn || new Date().toISOString()
+            };
+          } catch (err) {
+            console.error("Error processing donation document:", err, doc.id);
+            return null;
+          }
+        }).filter(Boolean); // Remove any nulls
+        
+        console.log("Processed donations:", donations.length);
+        return donations;
+      } catch (error) {
+        console.error("Error getting available donations:", error);
+        return []; // Return empty array on error
+      }
+    } catch (error) {
+      console.error("Error in getAvailableDonations:", error);
+      return []; // Return empty array on error
+    }
+  },
+  
+  // Get current user's donations (as donor) - with improved error handling
+  getMyDonations: async () => {
+    try {
+      const user = auth.currentUser;
+      if (!user) throw new Error('Not authenticated');
+      
       console.log("Getting donations for user:", user.uid);
       
       // Query Firestore for donations where donorId equals the current user's ID
       const donationsRef = collection(db, 'donations');
       const q = query(
         donationsRef,
-        where('donorId', '==', user.uid),
-        orderBy('createdAt', 'desc')
+        where('donorId', '==', user.uid)
       );
       
-      console.log("Executing Firestore query");
+      console.log("Executing Firestore query for user donations");
       const querySnapshot = await getDocs(q);
       console.log("Query complete, documents found:", querySnapshot.size);
       
-      // Convert query snapshot to array of donation objects
-      const donations = querySnapshot.docs.map(doc => ({
-        id: doc.id,
-        ...doc.data()
-      }));
+      // Convert query snapshot to array of donation objects with better error handling
+      const donations = querySnapshot.docs.map(doc => {
+        try {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            donorId: data.donorId || '',
+            donorName: data.donorName || 'Anonymous',
+            bloodType: data.bloodType || 'Unknown',
+            contactNumber: data.contactNumber || 'N/A',
+            availability: data.availability || 'N/A',
+            location: data.location || 'N/A',
+            additionalInfo: data.additionalInfo || '',
+            status: data.status || 'available',
+            recipientId: data.recipientId || '',
+            createdAt: data.createdAt?.toDate?.() || new Date(),
+            listedOn: data.listedOn || new Date().toISOString()
+          };
+        } catch (err) {
+          console.error("Error processing donation document:", err, doc.id);
+          return null;
+        }
+      }).filter(Boolean); // Remove any null items
       
-      console.log("Parsed donations:", donations);
+      console.log("Parsed donations:", donations.length, donations);
       return donations;
     } catch (error) {
       console.error("Error getting user donations:", error);
-      throw error;
+      return []; // Return empty array on error instead of throwing
     }
   },
   
-  // Get current user's donation requests (as recipient)
-  getMyRequests: async () => {
-    const user = auth.currentUser;
-    if (!user) throw new Error('Not authenticated');
-    
-    const myRequestsQuery = query(
-      collection(db, 'donations'),
-      where('recipientId', '==', user.uid),
-      orderBy('createdAt', 'desc')
-    );
-    
-    const requestsSnapshot = await getDocs(myRequestsQuery);
-    return requestsSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }));
-  },
-  
-  // Create a new donation listing
+  // Create a new donation listing - improved error handling and structure
   createDonation: async (donationData: any) => {
     try {
       // First check if the user is authenticated
@@ -480,37 +488,16 @@ export const donationAPI = {
       }
       
       const userData = userDoc.data();
-      console.log("User data for donation:", userData);
-      
-      // Check role in uppercase (standardize comparison)
-      const userRole = (userData.role || '').toUpperCase();
       
       // Always update the role to DONOR before attempting to create a donation
-      // This solves permission issues with security rules
-      if (userRole !== 'DONOR') {
-        console.log(`Current role is ${userRole}, updating to DONOR`);
-        
-        try {
-          // Update role to DONOR in Firestore
-          await updateDoc(doc(db, 'users', user.uid), {
-            role: 'DONOR',
-            updatedAt: Timestamp.now()
-          });
-          
-          // Also update in realtime DB
-          await update(ref(rtdb, `users/${user.uid}`), {
-            role: 'DONOR',
-            updatedAt: new Date().toISOString()
-          });
-          
-          console.log("Role updated to DONOR for donation");
-          
-          // Wait for permissions to propagate
-          await new Promise(resolve => setTimeout(resolve, 500));
-        } catch (roleError) {
-          console.error("Error updating role:", roleError);
-          // Continue anyway, maybe the donation creation will still work
-        }
+      try {
+        await updateDoc(doc(db, 'users', user.uid), {
+          role: 'DONOR',
+          updatedAt: Timestamp.now()
+        });
+      } catch (roleError) {
+        console.error("Error updating role:", roleError);
+        // Continue anyway - the donation might still work
       }
       
       // Ensure we have all required fields
@@ -522,6 +509,20 @@ export const donationAPI = {
       // Prepare donor name using first and last name if available
       const donorName = `${userData.firstName || ''} ${userData.lastName || ''}`.trim() || 'Anonymous';
       
+      // Generate a unique clientId that combines multiple approaches to ensure uniqueness
+      const clientId = donationData.submissionId || 
+        `${user.uid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Create a hash of the donation data to detect duplicates with similar content
+      const contentHash = hashDonationContent({
+        bloodType: donationData.bloodType,
+        contactNumber: donationData.contactNumber,
+        availability: donationData.availability,
+        location: donationData.location,
+        additionalInfo: donationData.additionalInfo || "",
+        donorId: user.uid
+      });
+      
       // Create the donation document with proper time fields
       const newDonation = {
         bloodType: donationData.bloodType,
@@ -529,140 +530,227 @@ export const donationAPI = {
         availability: donationData.availability,
         location: donationData.location,
         additionalInfo: donationData.additionalInfo || "",
-        status: donationData.status || 'available',
+        status: 'available',
         donorId: user.uid,
         donorName: donorName,
         donorEmail: user.email,
         createdAt: Timestamp.now(),
         listedOn: new Date().toISOString(),
-        updatedAt: Timestamp.now()
+        updatedAt: Timestamp.now(),
+        clientId: clientId,
+        contentHash: contentHash
       };
       
-      console.log("Saving donation to Firestore:", JSON.stringify(newDonation));
-      
-      // First try to create the donations collection if it doesn't exist yet
+      // Handle index errors more gracefully when checking for duplicates
       try {
-        // Create a temporary document if needed to ensure collection exists
-        const tempCollectionRef = collection(db, 'donations');
-        const donationsExist = await getDocs(query(tempCollectionRef, limit(1)));
-        
-        if (donationsExist.empty) {
-          console.log("Creating donations collection");
-          // Add a temporary document to create the collection
-          const tempDoc = await addDoc(tempCollectionRef, { 
-            temp: true, 
-            createdAt: Timestamp.now() 
-          });
-          
-          // Delete the temporary document
-          await deleteDoc(doc(db, 'donations', tempDoc.id));
-        }
-      } catch (error) {
-        console.log("Error checking/creating collection:", error);
-        // Continue anyway
-      }
-      
-      // Save to Firestore - now the collection should exist
-      try {
+        // Check for duplicates - first by clientId
         const donationsRef = collection(db, 'donations');
-        const docRef = await addDoc(donationsRef, newDonation);
-        console.log("Donation document created with ID:", docRef.id);
         
-        // Also save to realtime database for faster access
-        await set(ref(rtdb, `donations/${docRef.id}`), {
-          ...newDonation,
-          id: docRef.id,
-          createdAt: new Date().toISOString()
-        });
+        console.log(`Checking for existing donation with clientId: ${clientId}`);
+        let existingQuery = query(
+          donationsRef, 
+          where('clientId', '==', clientId),
+          limit(1)
+        );
         
-        // Update user's donation list (optional, for faster queries)
-        const userDonationsRef = collection(db, `users/${user.uid}/donations`);
-        await setDoc(doc(userDonationsRef, docRef.id), {
-          donationId: docRef.id,
-          bloodType: donationData.bloodType,
-          createdAt: Timestamp.now(),
-          status: 'available'
-        });
+        let existingDocs = await getDocs(existingQuery);
         
-        // Return the created document with ID and donor info
-        return {
-          id: docRef.id,
-          ...newDonation,
-          donor: {
-            firstName: userData.firstName || '',
-            lastName: userData.lastName || '',
-            email: user.email
+        // If no duplicates by clientId, also check for contentHash for recent donations
+        if (existingDocs.empty) {
+          try {
+            console.log(`Checking for similar donation with contentHash: ${contentHash}`);
+            
+            // Check donations from this user with the same content in the last 5 minutes
+            const fiveMinutesAgo = new Date();
+            fiveMinutesAgo.setMinutes(fiveMinutesAgo.getMinutes() - 5);
+            
+            existingQuery = query(
+              donationsRef,
+              where('donorId', '==', user.uid),
+              where('contentHash', '==', contentHash),
+              where('createdAt', '>', Timestamp.fromDate(fiveMinutesAgo)),
+              limit(1)
+            );
+            
+            existingDocs = await getDocs(existingQuery);
+          } catch (indexError) {
+            console.warn("Index error during content hash check - proceeding with creation:", indexError);
+            // Skip the content hash check if the index isn't ready
+            // Use a new query without the problematic filters to get a valid QuerySnapshot
+            existingQuery = query(
+              donationsRef,
+              where('donorId', '==', user.uid),
+              limit(0)
+            );
+            existingDocs = await getDocs(existingQuery);
           }
-        };
-      } catch (addError) {
-        console.error("Error adding donation document:", addError);
-        throw new Error("Failed to create donation. You may need to refresh and try again.");
+        }
+        
+        // Return existing donation if found to prevent duplicate
+        if (!existingDocs.empty) {
+          console.log("Duplicate donation detected, returning existing entry");
+          const existingDoc = existingDocs.docs[0];
+          return {
+            id: existingDoc.id,
+            ...existingDoc.data()
+          };
+        }
+      } catch (indexError) {
+        console.warn("Error during duplicate checks - proceeding with creation:", indexError);
+        // Continue with donation creation even if the index checks fail
       }
+      
+      // Save to Firestore if no duplicate found or if duplicate checks failed
+      console.log("Creating new donation document");
+      const docRef = await addDoc(collection(db, 'donations'), newDonation);
+      console.log("Donation document created with ID:", docRef.id);
+      
+      // Return the created document with ID and donor info
+      return {
+        id: docRef.id,
+        ...newDonation
+      };
     } catch (error: any) {
       console.error("Error creating donation:", error);
-      
-      // Check specific error types and provide helpful messages
-      if (error.code === 'permission-denied') {
-        throw new Error('Permission denied. Please make sure you are logged in as a donor. Try refreshing the page and trying again.');
-      } else if (error.message && error.message.includes('role')) {
-        throw new Error('You must be a donor to list donations. Please update your role in the dashboard and try again.');
-      } else {
-        throw error;
-      }
+      throw error;
     }
   },
   
   // Request a donation as a recipient
   requestDonation: async (donationId: string) => {
-    const user = auth.currentUser;
-    if (!user) throw new Error('Not authenticated');
-    
-    // Get user data for the recipient name
-    const userDoc = await getDoc(doc(db, 'users', user.uid));
-    const userData = userDoc.exists() ? userDoc.data() : null;
-    
-    await updateDoc(doc(db, 'donations', donationId), {
-      status: 'requested',
-      recipientId: user.uid,
-      recipientEmail: user.email,
-      recipientName: userData?.firstName ? `${userData.firstName} ${userData.lastName || ''}` : user.displayName || 'Anonymous Recipient',
-      requestedAt: Timestamp.now()
-    });
-    
-    // Add a notification for the donor
     try {
+      const user = auth.currentUser;
+      if (!user) throw new Error('Not authenticated');
+      
+      // Get user data for the recipient name
+      const userDoc = await getDoc(doc(db, 'users', user.uid));
+      const userData = userDoc.exists() ? userDoc.data() : null;
+      
+      // Update donation status to 'pending' instead of 'requested'
+      await updateDoc(doc(db, 'donations', donationId), {
+        status: 'pending', // Changed from 'requested' to 'pending'
+        recipientId: user.uid,
+        recipientEmail: user.email,
+        recipientName: userData?.firstName ? `${userData.firstName} ${userData.lastName || ''}` : user.displayName || 'Anonymous Recipient',
+        requestedAt: Timestamp.now()
+      });
+      
+      // Add a notification for the donor
+      try {
+        const donationDoc = await getDoc(doc(db, 'donations', donationId));
+        if (donationDoc.exists()) {
+          const donationData = donationDoc.data();
+          const donorId = donationData.donorId;
+          
+          // Create notification in Firestore
+          await addDoc(collection(db, 'notifications'), {
+            userId: donorId,
+            type: 'request',
+            title: 'New Donation Request',
+            message: `Someone has requested your ${donationData.bloodType} blood donation.`,
+            donationId: donationId,
+            read: false,
+            createdAt: Timestamp.now()
+          });
+          
+          // Also add to realtime database for immediate delivery
+          await rtdbPush(ref(rtdb, `users/${donorId}/notifications`), {
+            type: 'request',
+            title: 'New Donation Request',
+            message: `Someone has requested your ${donationData.bloodType} blood donation.`,
+            donationId: donationId,
+            read: false,
+            createdAt: new Date().toISOString()
+          });
+        }
+        
+        // Dispatch event to refresh UI
+        setTimeout(() => {
+          if (typeof window !== 'undefined') {
+            console.log("Dispatching donation-data-changed event after request");
+            window.dispatchEvent(new CustomEvent('donation-data-changed'));
+          }
+        }, 1000);
+      } catch (error) {
+        console.error("Error creating notification:", error);
+        // Continue anyway since the request was successful
+      }
+      
+      return { success: true };
+    } catch (error) {
+      console.error("Error requesting donation:", error);
+      throw error;
+    }
+  },
+  
+  // Reject a donation request (donor rejects)
+  rejectDonationRequest: async (donationId: string, recipientId: string) => {
+    try {
+      const user = auth.currentUser;
+      if (!user) throw new Error('Not authenticated');
+      
+      // Verify user is the donor
       const donationDoc = await getDoc(doc(db, 'donations', donationId));
-      if (donationDoc.exists()) {
-        const donationData = donationDoc.data();
-        const donorId = donationData.donorId;
+      if (!donationDoc.exists()) throw new Error('Donation not found');
+      
+      const donationData = donationDoc.data();
+      if (donationData.donorId !== user.uid) throw new Error('Only the donor can reject this request');
+      
+      // Update donation status back to available
+      await updateDoc(doc(db, 'donations', donationId), {
+        status: 'available',
+        recipientId: null,
+        recipientEmail: null,
+        recipientName: null,
+        requestedAt: null
+      });
+      
+      // Create notification for the recipient
+      try {
+        const userDoc = await getDoc(doc(db, 'users', user.uid));
+        const userData = userDoc.exists() ? userDoc.data() : null;
+        const donorName = userData && userData.firstName ? 
+          `${userData.firstName} ${userData.lastName || ''}` : 
+          user.displayName || 'A donor';
         
         // Create notification in Firestore
         await addDoc(collection(db, 'notifications'), {
-          userId: donorId,
-          type: 'request',
-          title: 'New Donation Request',
-          message: `Someone has requested your ${donationData.bloodType} blood donation.`,
+          userId: recipientId,
+          type: 'rejected',
+          title: 'Donation Request Rejected',
+          message: `${donorName} has declined your blood donation request.`,
           donationId: donationId,
           read: false,
           createdAt: Timestamp.now()
         });
         
         // Also add to realtime database for immediate delivery
-        await rtdbPush(ref(rtdb, `users/${donorId}/notifications`), {
-          type: 'request',
-          title: 'New Donation Request',
-          message: `Someone has requested your ${donationData.bloodType} blood donation.`,
+        await rtdbPush(ref(rtdb, `users/${recipientId}/notifications`), {
+          type: 'rejected',
+          title: 'Donation Request Rejected',
+          message: `${donorName} has declined your blood donation request.`,
           donationId: donationId,
           read: false,
           createdAt: new Date().toISOString()
         });
+      } catch (error) {
+        console.error("Error creating notification:", error);
+        // Continue anyway since the rejection was successful
       }
+      
+      // Dispatch event to refresh UI
+      setTimeout(() => {
+        if (typeof window !== 'undefined') {
+          console.log("Dispatching donation-data-changed event");
+          window.dispatchEvent(new CustomEvent('donation-data-changed'));
+        }
+      }, 1000);
+      
+      return { success: true };
     } catch (error) {
-      console.error("Error creating notification:", error);
-      // Continue anyway since the request was successful
+      console.error("Error rejecting donation request:", error);
+      throw error;
     }
-    
-    return { success: true };
   },
   
   // Accept a donation request (donor accepts a recipient's request)
@@ -716,6 +804,14 @@ export const donationAPI = {
       // Continue anyway since the acceptance was successful
     }
     
+    // Dispatch event to refresh UI
+    setTimeout(() => {
+      if (typeof window !== 'undefined') {
+        console.log("Dispatching donation-data-changed event");
+        window.dispatchEvent(new CustomEvent('donation-data-changed'));
+      }
+    }, 1000);
+    
     return { success: true };
   },
   
@@ -735,6 +831,14 @@ export const donationAPI = {
       status: 'completed',
       completedAt: Timestamp.now()
     });
+    
+    // Dispatch event to refresh UI
+    setTimeout(() => {
+      if (typeof window !== 'undefined') {
+        console.log("Dispatching donation-data-changed event");
+        window.dispatchEvent(new CustomEvent('donation-data-changed'));
+      }
+    }, 1000);
     
     return { success: true };
   },
@@ -758,26 +862,81 @@ export const donationAPI = {
       requestedAt: null
     });
     
+    // Dispatch event to refresh UI
+    setTimeout(() => {
+      if (typeof window !== 'undefined') {
+        console.log("Dispatching donation-data-changed event");
+        window.dispatchEvent(new CustomEvent('donation-data-changed'));
+      }
+    }, 1000);
+    
     return { success: true };
   },
   
   // Get user's notifications
   getNotifications: async () => {
-    const user = auth.currentUser;
-    if (!user) throw new Error('Not authenticated');
-    
-    const notificationsQuery = query(
-      collection(db, 'notifications'),
-      where('userId', '==', user.uid),
-      orderBy('createdAt', 'desc'),
-      limit(50)
-    );
-    
-    const notificationsSnapshot = await getDocs(notificationsQuery);
-    return notificationsSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data()
-    }));
+    try {
+      const user = auth.currentUser;
+      if (!user) return []; // Return empty array if not authenticated
+      
+      console.log("Fetching notifications for user:", user.uid);
+      
+      // Try to get notifications from Firestore first
+      try {
+        // Simplify the query to avoid the need for a complex index
+        const notificationsQuery = query(
+          collection(db, 'notifications'),
+          where('userId', '==', user.uid),
+          // Remove orderBy for now until the index is created
+          limit(50)
+        );
+        
+        const notificationsSnapshot = await getDocs(notificationsQuery);
+        let notificationsData = notificationsSnapshot.docs.map(doc => ({
+          id: doc.id,
+          ...doc.data()
+        })) as Array<{ id: string; createdAt?: { toDate?: () => Date } } & Record<string, any>>;
+        
+        // Sort in memory instead (less efficient but works without index)
+        notificationsData.sort((a, b) => {
+          const dateA = a.createdAt?.toDate?.() || new Date(0);
+          const dateB = b.createdAt?.toDate?.() || new Date(0);
+          return dateB.getTime() - dateA.getTime(); // descending (newest first)
+        });
+        
+        return notificationsData;
+      } catch (firestoreError) {
+        console.error("Error fetching notifications from Firestore:", firestoreError);
+        
+        // If Firestore fails, try real-time database as fallback
+        try {
+          console.log("Attempting to fetch notifications from Realtime DB as fallback");
+          const notificationsRef = ref(rtdb, `users/${user.uid}/notifications`);
+          const snapshot = await get(notificationsRef);
+          
+          if (snapshot.exists()) {
+            // Convert realtime DB format to array
+            const notificationsObj = snapshot.val();
+            return Object.keys(notificationsObj).map(key => ({
+              id: key,
+              ...notificationsObj[key],
+              // Ensure createdAt is a Firestore timestamp for compatibility
+              createdAt: {
+                toDate: () => new Date(notificationsObj[key].createdAt)
+              }
+            }));
+          }
+        } catch (rtdbError) {
+          console.error("Fallback also failed:", rtdbError);
+        }
+        
+        // If all fails, return empty array
+        return [];
+      }
+    } catch (error) {
+      console.error("Error in getNotifications:", error);
+      return []; // Return empty array on error
+    }
   },
   
   // Mark notification as read
@@ -792,3 +951,24 @@ export const donationAPI = {
     return { success: true };
   }
 };
+
+// Helper function to create a content hash for deduplication
+function hashDonationContent(data: any): string {
+  // Simple string-based hash
+  const normalizedString = Object.entries(data)
+    .filter(([key, value]) => value !== undefined && value !== null && value !== '')
+    .map(([key, value]) => `${key}:${value}`)
+    .sort()
+    .join('|')
+    .toLowerCase();
+  
+  // Basic hash function
+  let hash = 0;
+  for (let i = 0; i < normalizedString.length; i++) {
+    const char = normalizedString.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  
+  return hash.toString(16);
+}

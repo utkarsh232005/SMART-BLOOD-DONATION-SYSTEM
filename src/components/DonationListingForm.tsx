@@ -13,9 +13,11 @@ export interface DonationListingData {
   contactNumber: string;
   availability: string;
   location: string;
-  additionalInfo?: string;
+  additionalInfo: string;
   listedOn: string;
-  status: string;
+  status: 'available' | 'pending' | 'completed';
+  requesterId: string;
+  recipientName?: string; // Add this property to store recipient name
 }
 
 interface DonationListingFormProps {
@@ -71,10 +73,22 @@ const DonationListingForm = ({ isOpen, onClose, onSubmit }: DonationListingFormP
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
+    // Early return if already submitting to prevent double-submission
+    if (isSubmitting) return;
+    
     if (!validateForm()) return;
     
+    // Set submitting state immediately
     setIsSubmitting(true);
     setApiError(null);
+    
+    // Make a local copy of form data that we'll use for the API call
+    // This prevents any state updates during the submission process
+    const submissionData = { ...formData };
+    
+    // Generate a submission ID for deduplication
+    const submissionId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const toastId = toast.loading('Creating donation listing...');
     
     try {
       // First make sure user has donor role
@@ -82,63 +96,7 @@ const DonationListingForm = ({ isOpen, onClose, onSubmit }: DonationListingFormP
         throw new Error('You must be logged in to create a donation listing');
       }
       
-      // Check if user role is correct
-      const userRole = userData?.role?.toUpperCase() || '';
-      if (userRole !== 'DONOR') {
-        // Attempt to update role via auth context (this is more reliable)
-        try {
-          await toast.promise(
-            updateUserRole('donor'),
-            {
-              loading: 'Setting your role as donor...',
-              success: 'Role updated to donor!',
-              error: 'Failed to set role as donor'
-            }
-          );
-          
-          // Give Firebase a moment to update permissions
-          await new Promise(resolve => setTimeout(resolve, 500));
-        } catch (roleError) {
-          console.error("Failed to update role:", roleError);
-          // Still try to create the donation - the API will attempt to fix the role again
-        }
-      }
-      
-      // Call the API to create the donation
-      const response = await donationAPI.createDonation({
-        bloodType: formData.bloodType,
-        contactNumber: formData.contactNumber,
-        availability: formData.availability,
-        location: formData.location,
-        additionalInfo: formData.additionalInfo,
-        status: 'available'
-      });
-      
-      console.log('Donation created successfully:', response);
-      
-      // Format the data for the parent component
-      const newDonation: DonationListingData = {
-        id: `donation-${response.id}`,
-        donorName: response.donorName || 'You',
-        bloodType: formData.bloodType,
-        contactNumber: formData.contactNumber,
-        availability: formData.availability,
-        location: formData.location,
-        additionalInfo: formData.additionalInfo,
-        listedOn: new Date().toLocaleDateString('en-US', {
-          year: 'numeric',
-          month: 'long',
-          day: 'numeric'
-        }),
-        status: 'available'
-      };
-      
-      // Call the parent component's onSubmit handler
-      onSubmit(newDonation);
-      
-      toast.success('Donation listed successfully!');
-      
-      // Reset form and close modal
+      // First clear the form to prevent duplicate submissions if user clicks multiple times
       setFormData({
         bloodType: '',
         contactNumber: '',
@@ -147,22 +105,48 @@ const DonationListingForm = ({ isOpen, onClose, onSubmit }: DonationListingFormP
         additionalInfo: ''
       });
       
+      // Close the modal immediately before API call
       onClose();
+      
+      // Call the API to create the donation
+      console.log(`Submitting donation data (ID: ${submissionId}):`, submissionData);
+      const response = await donationAPI.createDonation({
+        ...submissionData,
+        submissionId, // Pass the submission ID to help with deduplication
+      });
+      
+      console.log('Donation created successfully:', response);
+      
+      // Format the data for the parent component
+      const newDonation: DonationListingData = {
+        id: `donation-${response.id}`,
+        donorName: 'donorName' in response ? response.donorName : 'You',
+        bloodType: submissionData.bloodType,
+        contactNumber: submissionData.contactNumber,
+        availability: submissionData.availability,
+        location: submissionData.location,
+        additionalInfo: submissionData.additionalInfo,
+        listedOn: new Date().toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric'
+        }),
+        status: 'available',
+        requesterId: '',
+      };
+      
+      // Notify parent of success
+      onSubmit(newDonation);
+      
+      // Show success message (parent component will now handle this)
+      toast.success('Donation listed successfully!', { id: toastId });
     } catch (error: any) {
       console.error('Error listing donation:', error);
       const errorMessage = error.message || 'Failed to list donation. Please try again.';
+      setApiError(errorMessage);
+      toast.error('Failed to list donation. Please try again', { id: toastId });
       
-      // Check for specific error messages and provide helpful actions
-      if (errorMessage.includes('role') || errorMessage.includes('donor')) {
-        setApiError(`${errorMessage} Please select "Be a Donor" at the top of your dashboard and try again.`);
-        toast.error('You need to be a donor to create listings');
-      } else if (errorMessage.includes('permission')) {
-        setApiError('Permission denied. Please make sure you have selected the Donor role and try again.');
-        toast.error('Permission denied. Please update your role');
-      } else {
-        setApiError(errorMessage);
-        toast.error('Failed to list donation. Please try again');
-      }
+      // Don't re-open modal on error, just show the error toast
     } finally {
       setIsSubmitting(false);
     }
