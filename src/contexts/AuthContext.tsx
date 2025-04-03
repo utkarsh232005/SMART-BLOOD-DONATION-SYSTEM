@@ -64,7 +64,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
 
-      // Save profile data to Firestore
+      // Save profile data to Firestore only
       await setDoc(doc(db, 'users', user.uid), {
         ...userData,
         email,
@@ -72,19 +72,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
         role: userData.role || 'donor',
       });
 
-      // Save to Realtime DB for online status
-      await set(ref(rtdb, `users/${user.uid}`), {
-        name: userData.name,
-        email,
-        bloodType: userData.bloodType,
-        online: true,
-        lastActive: new Date().toISOString()
-      });
-
-      // Add to blood type group
-      if (userData.bloodType) {
-        await set(ref(rtdb, `bloodGroups/${userData.bloodType}/${user.uid}`), true);
-      }
+      // Removed realtime database operations
     } catch (error: any) {
       console.error('Registration error:', error);
       setError(error.message);
@@ -96,8 +84,7 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     setError(null);
     try {
       if (user) {
-        // Update online status before signing out
-        await set(ref(rtdb, `users/${user.uid}/online`), false);
+        // No need to update online status before signing out
       }
       await signOut(auth);
     } catch (error: any) {

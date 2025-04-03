@@ -116,11 +116,26 @@ function App() {
     setAuthError(null);
     
     try {
-      const { email, password, ...userData } = registerFormData;
+      const { email, password, name, ...otherData } = registerFormData;
+      
+      // Ensure name is properly formatted and split into firstName and lastName
+      // This prevents the "undefined in property 'users.USER_ID.name'" error
+      const nameParts = (name || '').trim().split(' ');
+      const firstName = nameParts[0] || 'Anonymous';
+      const lastName = nameParts.slice(1).join(' ') || 'User';
+      
+      const userData = {
+        ...otherData,
+        firstName,
+        lastName,
+        name: `${firstName} ${lastName}`,  // Explicitly set name field
+      };
+      
       await register(email, password, userData);
       setIsRegistering(false);
       setShowLoginForm(false);
     } catch (error: any) {
+      console.error('Registration error:', error);
       setAuthError(error.message || 'Registration failed');
     }
   };

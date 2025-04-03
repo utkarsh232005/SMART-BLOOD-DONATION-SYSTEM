@@ -81,27 +81,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const userCredential = await createUserWithEmailAndPassword(auth, email, password);
       const user = userCredential.user;
 
-      // Save to Firestore (detailed profile)
+      // Make sure name field is properly set
+      const firstName = userData.firstName || 'Anonymous';
+      const lastName = userData.lastName || 'User';
+      const fullName = userData.name || `${firstName} ${lastName}`;
+
+      // Save to Firestore only (no Realtime Database)
       await setDoc(doc(db, 'users', user.uid), {
         ...userData,
+        firstName,
+        lastName,
+        name: fullName, // Ensure name is explicitly set
         email,
         createdAt: new Date(),
         role: userData.role || 'donor',
       });
 
-      // Save to Realtime DB (online status, quick access)
-      await set(ref(rtdb, `users/${user.uid}`), {
-        name: userData.name,
-        email,
-        bloodType: userData.bloodType,
-        online: true,
-        lastActive: new Date().toISOString()
-      });
-
-      // Add to blood type group if applicable
-      if (userData.bloodType) {
-        await set(ref(rtdb, `bloodGroups/${userData.bloodType}/${user.uid}`), true);
-      }
+      // No Realtime Database operations
 
     } catch (error: any) {
       console.error('Registration error:', error);
@@ -113,10 +109,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     setError(null);
     try {
-      if (user) {
-        // Update online status before signing out
-        await set(ref(rtdb, `users/${user.uid}/online`), false);
-      }
+      // No Realtime Database operations needed
       await signOut(auth);
     } catch (error: any) {
       console.error('Logout error:', error);
@@ -136,17 +129,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       
       console.log(`Updating user role to ${roleUppercase}`);
       
-      // Update in Firestore
+      // Update in Firestore only
       await updateDoc(doc(db, 'users', user.uid), {
         role: roleUppercase,
         updatedAt: new Date()
       });
       
-      // Update realtime database for faster access
-      await update(ref(rtdb, `users/${user.uid}`), {
-        role: roleUppercase,
-        updatedAt: new Date().toISOString()
-      });
+      // No realtime database updates
       
       // Update user state with new role
       setUser(currentUser => {
@@ -157,8 +146,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         updatedUser.role = roleUppercase as 'DONOR' | 'RECIPIENT';
         return updatedUser;
       });
-      
-
       
       // Update user data state
       setUserData((currentData: any) => {

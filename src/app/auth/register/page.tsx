@@ -18,13 +18,22 @@ export default function Register() {
     const formData = new FormData(e.currentTarget);
     
     // Prepare user data for registration
+    const firstName = (formData.get('firstName') as string || '').trim();
+    const lastName = (formData.get('lastName') as string || '').trim();
+    
+    // Default values if empty
+    const safeFirstName = firstName || 'Anonymous';
+    const safeLastName = lastName || 'User';
+    
     const userData = {
-      firstName: formData.get('firstName') as string,
-      lastName: formData.get('lastName') as string,
+      firstName: safeFirstName,
+      lastName: safeLastName,
       email: formData.get('email') as string,
       password: formData.get('password') as string,
       bloodType: formData.get('bloodType') as string,
-      role: 'DONOR' // Default role
+      role: 'DONOR', // Default role
+      // Explicitly add the name field to prevent undefined errors
+      name: `${safeFirstName} ${safeLastName}`
     };
     
     try {
@@ -35,6 +44,7 @@ export default function Register() {
         {
           firstName: userData.firstName,
           lastName: userData.lastName,
+          name: userData.name, // Include explicit name field
           bloodType: userData.bloodType,
           role: userData.role
         }
@@ -49,6 +59,8 @@ export default function Register() {
         router.push('/auth/login');
       }, 2000);
     } catch (err) {
+      console.error('Registration error:', err);
+      
       // Show error message
       setShowAlert(true);
       setAlertType('error');
