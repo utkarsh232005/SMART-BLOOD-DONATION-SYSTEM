@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect } from 'react';
+import { useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { toast, Toaster } from 'react-hot-toast';
 
-const LoginPage = () => {
+const LoginContent = () => {
   const searchParams = useSearchParams();
 
   useEffect(() => {
@@ -17,9 +17,19 @@ const LoginPage = () => {
   }, [searchParams]);
 
   return (
-    <div className="min-h-screen bg-[#121212] text-white flex items-center justify-center">
+    <>
       <Toaster position="top-right" />
       {/* Add your login form or other components here */}
+    </>
+  );
+};
+
+const LoginPage = () => {
+  return (
+    <div className="min-h-screen bg-[#121212] text-white flex items-center justify-center">
+      <Suspense fallback={<div>Loading...</div>}>
+        <LoginContent />
+      </Suspense>
     </div>
   );
 };
