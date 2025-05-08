@@ -14,7 +14,7 @@ import {
   limit,
   deleteDoc
 } from 'firebase/firestore';
-import { get, ref, set, update, push as rtdbPush } from 'firebase/database';
+import { get, ref, set, update, push as rtdbPush, push } from 'firebase/database';
 import { auth, db, rtdb } from './firebase-config';
 import { User, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from 'firebase/auth';
 
@@ -962,6 +962,75 @@ export const donationAPI = {
     });
 
     return { success: true };
+  },
+
+  getHospitalAppointments: async (hospitalId: string) => {
+    try {
+      const appointmentsQuery = query(
+        collection(db, 'appointments'),
+        where('hospitalId', '==', hospitalId),
+        orderBy('createdAt', 'desc')
+      );
+
+      const snapshot = await getDocs(appointmentsQuery);
+      return snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+    } catch (error) {
+      console.error('Error fetching hospital appointments:', error);
+      throw error;
+    }
+  },
+
+  createBloodRequest: async (requestData: any) => {
+    try {
+      const user = auth.currentUser;
+      if (!user) throw new Error('Not authenticated');
+
+      const docRef = await addDoc(collection(db, 'bloodRequests'), {
+        ...requestData,
+        createdAt: Timestamp.now(),
+        status: 'active'
+      });
+
+      // Create notification for matching donors
+      const notificationData = {
+        type: requestData.urgency === 'emergency' ? 'emergency' : 'request',
+        title: `${requestData.urgency.toUpperCase()} Blood Request`,
+        message: `${requestData.units} units of ${requestData.bloodType} blood needed at ${requestData.location}`,
+        requestId: docRef.id,
+        createdAt: Date.now()
+      };
+
+      // Add to blood type specific notification channel
+      await push(ref(rtdb, `notifications/bloodType/${requestData.bloodType}`), notificationData);
+
+      return {
+        id: docRef.id,
+        ...requestData
+      };
+    } catch (error) {
+      console.error('Error creating blood request:', error);
+      throw error;
+    }
+  },
+
+  updateAppointmentStatus: async (appointmentId: string, status: string) => {
+    try {
+      const user = auth.currentUser;
+      if (!user) throw new Error('Not authenticated');
+
+      await updateDoc(doc(db, 'appointments', appointmentId), {
+        status: status,
+        updatedAt: Timestamp.now()
+      });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error updating appointment status:', error);
+      throw error;
+    }
   }
 };
 
